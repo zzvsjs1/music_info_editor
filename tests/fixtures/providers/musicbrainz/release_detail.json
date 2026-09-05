@@ -1,0 +1,180 @@
+{
+  "id": "11111111-1111-4111-8111-111111111111",
+  "title": "Adventure Soundtrack",
+  "text-representation": {
+    "language": "jpn",
+    "script": "Jpan"
+  },
+  "artist-credit": [
+    {
+      "name": "The Game Orchestra",
+      "artist": {
+        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "name": "Game Orchestra"
+      }
+    }
+  ],
+  "date": "2003-03-19",
+  "media": [
+    {
+      "position": 1,
+      "title": "Sea",
+      "track-count": 2,
+      "track-offset": 0,
+      "tracks": [
+        {
+          "position": 1,
+          "title": "Opening Theme",
+          "length": 181234,
+          "artist-credit": [
+            {
+              "name": "The Game Orchestra"
+            }
+          ],
+          "recording": {
+            "id": "33333333-3333-4333-8333-333333333331",
+            "title": "Opening Theme (recording title)",
+            "length": 181999,
+            "artist-credit": [
+              {
+                "name": "Game Orchestra"
+              }
+            ],
+            "relations": [
+              {
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "target-type": "work",
+                "work": {
+                  "id": "44444444-4444-4444-8444-444444444441",
+                  "title": "Opening Theme",
+                  "relations": [
+                    {
+                      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                      "target-type": "artist",
+                      "target-credit": "K. Kondo",
+                      "artist": {
+                        "id": "55555555-5555-4555-8555-555555555551",
+                        "name": "Koji Kondo"
+                      }
+                    },
+                    {
+                      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                      "target-type": "artist",
+                      "artist": {
+                        "id": "55555555-5555-4555-8555-555555555551",
+                        "name": "Koji Kondo"
+                      }
+                    },
+                    {
+                      "type-id": "3e48faba-ec01-47fd-8e89-30e81161661c",
+                      "target-type": "artist",
+                      "artist": {
+                        "id": "66666666-6666-4666-8666-666666666666",
+                        "name": "Example Lyricist"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "target-type": "work",
+                "work": {
+                  "id": "44444444-4444-4444-8444-444444444441",
+                  "title": "Opening Theme",
+                  "relations": [
+                    {
+                      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                      "target-type": "artist",
+                      "artist": {
+                        "id": "55555555-5555-4555-8555-555555555551",
+                        "name": "Koji Kondo"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "position": 2,
+          "recording": {
+            "id": "33333333-3333-4333-8333-333333333332",
+            "title": "Ocean Voyage",
+            "length": 202000,
+            "artist-credit": [
+              {
+                "name": "Soloist, as credited",
+                "artist": {
+                  "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                  "name": "Soloist Sort Name"
+                }
+              }
+            ],
+            "relations": [
+              {
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "target-type": "work",
+                "work": {
+                  "id": "44444444-4444-4444-8444-444444444442",
+                  "title": "Ocean Voyage",
+                  "relations": [
+                    {
+                      "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                      "target-type": "artist",
+                      "artist": {
+                        "id": "77777777-7777-4777-8777-777777777777",
+                        "name": "Mitsuko Nagata"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "position": 2,
+      "track-count": 1,
+      "track-offset": 0,
+      "tracks": [
+        {
+          "position": 1,
+          "title": "Finale",
+          "artist-credit": [
+            {
+              "name": "Finale Ensemble"
+            }
+          ],
+          "recording": {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "title": "Finale",
+            "relations": [
+              {
+                "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+                "target-type": "work",
+                "work": {
+                  "id": "44444444-4444-4444-8444-444444444443",
+                  "title": "Finale",
+                  "relations": [
+                    {
+                      "type-id": "3e48faba-ec01-47fd-8e89-30e81161661c",
+                      "target-type": "artist",
+                      "artist": {
+                        "id": "66666666-6666-4666-8666-666666666666",
+                        "name": "Example Lyricist"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

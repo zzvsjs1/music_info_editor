@@ -1,0 +1,36 @@
+/.venv/
+/musics/
+/.plans/
+/plans/
+/docs/
+settings.json
+logs/
+reports/
+/build/
+/dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.vscode/
+.idea/
+
+# Local credentials and environment configuration must stay out of releases.
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# Keep the documented synthetic loopback PEM fixtures available to tests.
+# Ignore local assistant state and operating-system clutter.
+.codex/
+.agents/
+Thumbs.db
+Desktop.ini
+.DS_Store

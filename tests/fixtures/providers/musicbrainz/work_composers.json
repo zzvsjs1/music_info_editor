@@ -1,0 +1,91 @@
+{
+  "recordings": [
+    {
+      "id": "88888888-8888-4888-8888-888888888881",
+      "relations": [
+        {
+          "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+          "target-type": "work",
+          "work": {
+            "id": "99999999-9999-4999-8999-999999999991",
+            "relations": [
+              {
+                "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                "target-type": "artist",
+                "target-credit": "K. Kondo",
+                "artist": {
+                  "id": "55555555-5555-4555-8555-555555555551",
+                  "name": "Koji Kondo"
+                }
+              },
+              {
+                "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                "target-type": "artist",
+                "artist": {
+                  "id": "55555555-5555-4555-8555-555555555551",
+                  "name": "Koji Kondo"
+                }
+              },
+              {
+                "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                "target-type": "artist",
+                "target-credit": "M. Nagata",
+                "artist": {
+                  "id": "77777777-7777-4777-8777-777777777777",
+                  "name": "Mitsuko Nagata"
+                }
+              },
+              {
+                "type-id": "3e48faba-ec01-47fd-8e89-30e81161661c",
+                "target-type": "artist",
+                "artist": {
+                  "id": "66666666-6666-4666-8666-666666666666",
+                  "name": "Example Lyricist"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+          "target-type": "work",
+          "work": {
+            "id": "99999999-9999-4999-8999-999999999991",
+            "relations": [
+              {
+                "type-id": "d59d99ea-23d4-4a80-b066-edca32ee158f",
+                "target-type": "artist",
+                "artist": {
+                  "id": "77777777-7777-4777-8777-777777777777",
+                  "name": "Mitsuko Nagata"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "88888888-8888-4888-8888-888888888882",
+      "relations": [
+        {
+          "type-id": "a3005666-a872-32c3-ad06-98af558e99b0",
+          "target-type": "work",
+          "work": {
+            "id": "99999999-9999-4999-8999-999999999992",
+            "relations": [
+              {
+                "type-id": "3e48faba-ec01-47fd-8e89-30e81161661c",
+                "target-type": "artist",
+                "artist": {
+                  "id": "66666666-6666-4666-8666-666666666666",
+                  "name": "Example Lyricist"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

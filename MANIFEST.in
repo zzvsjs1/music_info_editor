@@ -1,0 +1,26 @@
+# Source releases contain the application and reproducible public development files.
+include LICENSE THIRD_PARTY_NOTICES.md README.md CONTRIBUTING.md SECURITY.md
+include .gitignore pyproject.toml MANIFEST.in
+recursive-include .github *.yml *.md
+recursive-include packaging *.spec
+recursive-include scripts *.py
+recursive-include src *.py
+recursive-include tests *.py *.md
+recursive-include tests/fixtures/providers *.html *.json
+include tests/fixtures/network/loopback-test-cert.pem
+include tests/fixtures/network/loopback-test-key.pem
+
+# Defence in depth against stale setuptools file lists and local runtime data.
+prune .git
+prune .venv
+prune .codex
+prune .agents
+prune musics
+prune plans
+prune .plans
+prune docs
+prune build
+prune dist
+prune logs
+prune reports
+global-exclude settings.json .env .env.* *.py[cod] *.log *.pfx *.p12

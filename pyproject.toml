@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metadata-polisher"
+version = "0.1.0"
+description = "Review and safely repair metadata in an existing music library."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+requires-python = ">=3.14"
+keywords = ["music", "metadata", "tagging", "windows"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+    "PySide6",
+    "httpx",
+    "mutagen",
+    "rapidfuzz",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "mypy",
+    "pyinstaller",
+    "pytest",
+    "pytest-cov",
+    "pytest-qt",
+    "ruff",
+]
+
+[project.scripts]
+metadata-polisher = "metadata_polisher.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["metadata_polisher*"]
+
+[tool.setuptools]
+# Runtime settings are created beside the application, never shipped as data.
+include-package-data = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--import-mode=importlib", "-m", "not live and not localmedia"]
+qt_api = "pyside6"
+markers = [
+    "live: tests that access live metadata providers (opt-in)",
+    "localmedia: tests that copy and exercise user-provided media (opt-in)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["src/metadata_polisher"]
+strict = true
+warn_unreachable = true

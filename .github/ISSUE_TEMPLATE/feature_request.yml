@@ -1,0 +1,28 @@
+name: Feature request
+description: Describe a problem or improvement for Metadata Polisher.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe your workflow and the difficulty you encounter. Keep personal music files and identifying paths out of examples.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed behaviour
+      description: Explain what you would like the application to do and how you would review any resulting file changes.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Mention existing controls or workarounds you have tried.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Examples or supporting references
+      description: For metadata-format or provider requests, include relevant official documentation where available. Use generated or sanitised examples.
