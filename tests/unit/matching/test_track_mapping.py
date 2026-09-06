@@ -1,4 +1,6 @@
-from dataclasses import FrozenInstanceError
+import math
+import random
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -11,8 +13,18 @@ from metadata_polisher.domain.matching import (
 )
 from metadata_polisher.domain.media import FilenameHints, LocalMediaFile, MediaReadResult, StreamInfo
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField, MetadataSnapshot, Position
+from metadata_polisher.matching.policy import DEFAULT_MATCHING_POLICY, MatchingPolicy, TrackMappingPolicy
 from metadata_polisher.matching.release_scoring import MatchClassification, MatchReasonCode
-from metadata_polisher.matching.track_mapping import TrackMappingResult, map_tracks
+from metadata_polisher.matching.track_mapping import (
+    TrackMappingResult,
+    _align_segment,
+    _ambiguous_locals,
+    _anchor_candidates,
+    _build_assessment_matrix,
+    _feasible_segment_pairs,
+    _PairAssessment,
+    map_tracks,
+)
 
 
 def make_local(
@@ -395,3 +407,289 @@ def test_mapping_result_rejects_boolean_provider_indexes() -> None:
             classification=MatchClassification.LOW,
             evidence=(),
         )
+
+
+@pytest.mark.parametrize("available_duration", [60.0, 64.0])
+def test_missing_provider_duration_cannot_resolve_repeated_title_identity(
+    available_duration: float,
+) -> None:
+    local = tuple(
+        make_local(name, title="Interlude", tagged_number=None, duration=60)
+        for name in ("a", "b")
+    )
+    release = make_release(
+        make_provider(None, "Interlude", duration=available_duration),
+        make_provider(None, "Interlude", duration=None),
+    )
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    # Both alternatives have exactly the same shared title evidence. The
+    # absent duration changes the denominator, not the identity of the track.
+    assert result.classification is MatchClassification.REVIEW
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS in result.reason_codes
+    assert all(item.classification is MatchClassification.REVIEW for item in result.mappings)
+
+
+def test_different_durations_resolve_repeated_titles() -> None:
+    local = (
+        make_local("short", title="Interlude", tagged_number=None, duration=60),
+        make_local("long", title="Interlude", tagged_number=None, duration=120),
+    )
+    release = make_release(
+        make_provider(None, "Interlude", duration=60),
+        make_provider(None, "Interlude", duration=120),
+    )
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert mapping_pairs(result) == (("short", 0), ("long", 1))
+    assert result.classification is MatchClassification.HIGH
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS not in result.reason_codes
+
+
+@pytest.mark.parametrize("extra_provider", [False, True])
+def test_indistinguishable_local_competitors_do_not_produce_a_high_winner(
+    extra_provider: bool,
+) -> None:
+    local = tuple(
+        make_local(name, title="Interlude", tagged_number=None, duration=60)
+        for name in ("a", "b")
+    )
+    providers = (make_provider(None, "Interlude", duration=60),)
+
+    if extra_provider:
+        providers = (*providers, make_provider(None, "XYZ", duration=60))
+
+    result = map_tracks(local, make_release(*providers), selected_medium_index=0)
+
+    assert result.classification is MatchClassification.REVIEW
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS in result.reason_codes
+    assert all(item.classification is MatchClassification.REVIEW for item in result.mappings)
+
+
+def test_missing_local_duration_cannot_resolve_competition_for_one_provider_track() -> None:
+    local = (
+        make_local("known", title="Interlude", tagged_number=None, duration=64),
+        make_local("unknown", title="Interlude", tagged_number=None, duration=None),
+    )
+    release = make_release(make_provider(None, "Interlude", duration=60))
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert result.classification is MatchClassification.REVIEW
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS in result.reason_codes
+    assert all(item.classification is MatchClassification.REVIEW for item in result.mappings)
+
+
+@pytest.mark.parametrize("tagged_anchor", [False, True])
+def test_supported_neighbour_rules_out_competition_that_would_cross_it(
+    tagged_anchor: bool,
+) -> None:
+    local = (
+        make_local("before", title="Interlude", tagged_number=None, duration=60),
+        make_local("middle", title="Keystone", tagged_number=2 if tagged_anchor else None, duration=240),
+        make_local("after", title="Interlude", tagged_number=None, duration=60),
+    )
+    release = make_release(
+        make_provider(1 if tagged_anchor else None, "Interlude", duration=60),
+        make_provider(2 if tagged_anchor else None, "Keystone", duration=240),
+    )
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    # The middle title/duration pair is independently unique on both sides,
+    # even without numbering. The later duplicate cannot cross that pair.
+    assert mapping_pairs(result) == (("before", 0), ("middle", 1))
+    assert result.unmatched_local_file_ids == ("after",)
+    assert all(item.classification is MatchClassification.HIGH for item in result.mappings)
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS not in result.reason_codes
+
+
+@pytest.mark.parametrize("number_source", ["tag", "filename"])
+def test_number_only_pairs_remain_reviewable_and_cannot_force_anchors(number_source: str) -> None:
+    local = (make_local(
+        "numbered",
+        title=None,
+        tagged_number=1 if number_source == "tag" else None,
+        filename_number=1 if number_source == "filename" else None,
+        filename_title="Unknown" if number_source == "filename" else None,
+        duration=None,
+    ),)
+    release = make_release(make_provider(1, None, duration=None))
+    assessments = _build_assessment_matrix(local, release.media[0].tracks, DEFAULT_MATCHING_POLICY)
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert mapping_pairs(result) == (("numbered", 0),)
+    assert result.classification is MatchClassification.REVIEW
+    assert result.mappings[0].classification is MatchClassification.REVIEW
+    assert result.mappings[0].score == (100.0 if number_source == "tag" else 88.0)
+    assert "TRACK_CONTENT_SUPPORT_INSUFFICIENT" in result.mappings[0].reason_codes
+    assert _anchor_candidates(local, release.media[0].tracks, assessments, DEFAULT_MATCHING_POLICY) == ()
+
+
+@pytest.mark.parametrize("tracks_complete,media_complete", [(False, True), (True, False), (False, False)])
+def test_listing_completeness_caps_summary_without_discarding_supported_pairs(
+    tracks_complete: bool,
+    media_complete: bool,
+) -> None:
+    local = (make_local("a", title="Opening", tagged_number=1),)
+    complete_release = make_release(make_provider(1, "Opening"))
+    release = replace(
+        complete_release,
+        media=(replace(complete_release.media[0], tracks_complete=tracks_complete),),
+        media_complete=media_complete,
+    )
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert result.classification is MatchClassification.REVIEW
+    assert result.mappings[0].classification is MatchClassification.HIGH
+    assert MatchReasonCode.TRACK_MAPPING_COMPLETE in result.reason_codes
+    assert MatchReasonCode.PROVIDER_LIST_INCOMPLETE in result.reason_codes
+    assert result.mappings[0].track_position == Position(1, 1 if tracks_complete else None)
+    assert result.mappings[0].disc_position == Position(1, 1 if media_complete else None)
+
+
+def test_uncorroborated_filename_number_does_not_block_stronger_ordered_title_pairs() -> None:
+    local = (
+        make_local("hint", title=None, tagged_number=None, filename_number=2, filename_title="Z", duration=None),
+        make_local("a", title="A", tagged_number=None, duration=None),
+        *(make_local(title.lower(), title=title, tagged_number=None, duration=None) for title in "CDEFGH"),
+    )
+    release = make_release(
+        make_provider(1, "A", duration=None),
+        make_provider(2, None, duration=None),
+        *(make_provider(index, title, duration=None) for index, title in enumerate("CDEFGH", 3)),
+    )
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert mapping_pairs(result) == (
+        ("a", 0),
+        *((title.lower(), index) for index, title in enumerate("CDEFGH", 2)),
+    )
+    assert result.unmatched_local_file_ids == ("hint",)
+    assert result.unmatched_provider_indexes == (1,)
+
+
+@pytest.mark.parametrize("threshold,expected", [(0.90, MatchClassification.HIGH), (0.91, MatchClassification.REVIEW)])
+def test_content_support_boundary_is_shared_by_anchors_and_classification(
+    threshold: float,
+    expected: MatchClassification,
+) -> None:
+    # Nine of ten title characters agree: the exact similarity is 0.90.
+    local = (make_local("a", title="abcdefghij", tagged_number=1, duration=None),)
+    release = make_release(make_provider(1, "abcdefghix", duration=None))
+    policy = MatchingPolicy(track_mapping=TrackMappingPolicy(minimum_content_title_similarity=threshold))
+    assessments = _build_assessment_matrix(local, release.media[0].tracks, policy)
+
+    result = map_tracks(local, release, selected_medium_index=0, policy=policy)
+    anchors = _anchor_candidates(local, release.media[0].tracks, assessments, policy)
+
+    assert result.mappings[0].classification is expected
+    assert anchors == (((0, 0),) if expected is MatchClassification.HIGH else ())
+
+
+@pytest.mark.parametrize("threshold", [-0.01, 1.01, float("inf"), float("nan"), True])
+def test_content_support_threshold_rejects_invalid_values(threshold: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        TrackMappingPolicy(minimum_content_title_similarity=threshold)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("delta,expected", [
+    (2.999, MatchClassification.HIGH),
+    (3.0, MatchClassification.HIGH),
+    (3.001, MatchClassification.REVIEW),
+])
+def test_close_duration_content_boundary_is_shared_by_anchors_and_classification(
+    delta: float,
+    expected: MatchClassification,
+) -> None:
+    local = (make_local("a", title=None, tagged_number=1, duration=60),)
+    release = make_release(make_provider(1, None, duration=60 + delta))
+    assessments = _build_assessment_matrix(local, release.media[0].tracks, DEFAULT_MATCHING_POLICY)
+
+    result = map_tracks(local, release, selected_medium_index=0)
+    anchors = _anchor_candidates(local, release.media[0].tracks, assessments, DEFAULT_MATCHING_POLICY)
+
+    assert result.mappings[0].classification is expected
+    assert anchors == (((0, 0),) if expected is MatchClassification.HIGH else ())
+
+
+def _enumerated_segment_optimum(
+    matrix: tuple[tuple[_PairAssessment, ...], ...],
+    allowed: frozenset[tuple[int, int]],
+    *,
+    local_count: int,
+    provider_count: int,
+) -> tuple[tuple[int, int], ...]:
+    paths: list[tuple[tuple[int, int], ...]] = []
+    policy = DEFAULT_MATCHING_POLICY.track_mapping
+
+    def visit(start_local: int, start_provider: int, path: tuple[tuple[int, int], ...]) -> None:
+        paths.append(path)
+
+        for local_index in range(start_local, local_count):
+            for provider_index in range(start_provider, provider_count):
+                if (local_index, provider_index) in allowed:
+                    visit(local_index + 1, provider_index + 1, (*path, (local_index, provider_index)))
+
+    def reward(path: tuple[tuple[int, int], ...]) -> float:
+        # Every pair consumes one row on each side. All remaining rows are
+        # gaps, independent of the order in which the DP would encounter them.
+        earned = sum(matrix[i][j].score - policy.minimum_pair_score for i, j in path)
+        gaps = local_count + provider_count - 2 * len(path)
+
+        return earned - policy.gap_penalty * gaps
+
+    visit(0, 0, ())
+    greatest_reward = max(reward(path) for path in paths)
+    tied = tuple(path for path in paths if math.isclose(reward(path), greatest_reward, abs_tol=1e-9))
+    greatest_count = max(map(len, tied))
+
+    return min(path for path in tied if len(path) == greatest_count)
+
+
+def test_segment_objective_matches_independent_enumeration_of_250_native_cases() -> None:
+    rng = random.Random(69420)
+    policy = DEFAULT_MATCHING_POLICY
+
+    for case in range(250):
+        local_count, provider_count = rng.randrange(5), rng.randrange(5)
+        local = tuple(make_local(
+            str(index),
+            title=rng.choice((None, "A", "B", "AA")),
+            tagged_number=rng.choice((None, 1, 2, 3)),
+            duration=rng.choice((None, 60, 64, 120)),
+        ) for index in range(local_count))
+        providers = tuple(make_provider(
+            rng.choice((None, 1, 2, 3)),
+            rng.choice((None, "A", "B", "AA")),
+            duration=rng.choice((None, 60, 64, 120)),
+        ) for _ in range(provider_count))
+        matrix = _build_assessment_matrix(local, providers, policy)
+        bounds = {
+            "local_start": 0,
+            "local_end": local_count,
+            "provider_start": 0,
+            "provider_end": provider_count,
+        }
+        feasible = _feasible_segment_pairs(matrix, **bounds, policy=policy)
+        ambiguous = _ambiguous_locals(matrix, **bounds, policy=policy)
+        allowed = frozenset(pair for pair in feasible if pair[0] not in ambiguous)
+
+        # Only pair eligibility comes from production. Enumerate the objective
+        # independently; the separate named fixtures above test whether those
+        # exclusions correctly describe ambiguity and supported neighbours.
+        expected = _enumerated_segment_optimum(
+            matrix,
+            allowed,
+            local_count=local_count,
+            provider_count=provider_count,
+        )
+        actual, returned_ambiguous = _align_segment(matrix, **bounds, policy=policy)
+
+        assert actual == expected, f"Native alignment case {case}: {local_count} by {provider_count}"
+        assert returned_ambiguous == ambiguous

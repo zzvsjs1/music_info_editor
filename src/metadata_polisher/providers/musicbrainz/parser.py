@@ -26,7 +26,7 @@ def _as_mapping(value: object) -> Mapping[str, object] | None:
     if not isinstance(value, Mapping):
         return None
 
-    return cast(Mapping[str, object], value)
+    return value
 
 
 def _mapping_items(container: Mapping[str, object], key: str) -> tuple[Mapping[str, object], ...]:

@@ -11,14 +11,27 @@ from rapidfuzz.fuzz import ratio
 from metadata_polisher.domain.matching import ProviderTrack, ReleaseCandidate
 from metadata_polisher.domain.media import LocalMediaFile
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position
+from metadata_polisher.matching.evidence import effective_local_title
 from metadata_polisher.matching.normalisation import normalise_for_matching
-from metadata_polisher.matching.policy import DEFAULT_MATCHING_POLICY, MatchingPolicy
+from metadata_polisher.matching.policy import DEFAULT_MATCHING_POLICY, SCORE_DECIMAL_PLACES, MatchingPolicy
 from metadata_polisher.matching.release_scoring import (
     MatchClassification,
     MatchEvidence,
     MatchReasonCode,
     order_local_track_files,
 )
+
+# Floating-point path totals need a much smaller comparison tolerance than
+# public score precision. This is arithmetic housekeeping, not the policy
+# margin that decides whether identities are ambiguous.
+_ALIGNMENT_ABSOLUTE_TOLERANCE = 1e-9
+
+
+# Named tuple shapes keep the row/column helpers readable. Each pair always
+# stores the local index first and the provider index second.
+type _PairIndex = tuple[int, int]
+type _PairIndexes = tuple[_PairIndex, ...]
+type _PairGroups = tuple[_PairIndexes, ...]
 
 
 # The mapper first selects numbered anchors, then aligns the remaining
@@ -172,6 +185,12 @@ class _PairAssessment:
     number_source: _NumberSource | None
     number_agrees: bool | None
     evidence: tuple[MatchEvidence, ...]
+    # Retain availability and agreement separately. Aggregate scores alone
+    # cannot compare alternatives fairly when their denominators differ.
+    # Defaults preserve the private constructor used by independent oracles.
+    title_similarity: float | None = None
+    duration_similarity: float | None = None
+    number_similarity: float | None = None
 
 
 # value is the accumulated alignment reward after gap penalties; pairs is
@@ -215,13 +234,6 @@ def _positive_integer(value: object) -> int | None:
     return value
 
 
-def _local_title(file: LocalMediaFile) -> str | None:
-    if file.read_result.field_states[MetadataField.TITLE] is FieldReadState.PRESENT:
-        return _clean_text(file.read_result.metadata.title)
-
-    return _clean_text(file.filename_hints.probable_title)
-
-
 # A PRESENT track tag owns this evidence tier, even if its number is unusable.
 # A filename must not silently replace an existing tag during pair assessment.
 def _local_number(file: LocalMediaFile) -> tuple[int | None, _NumberSource | None]:
@@ -239,9 +251,10 @@ def _local_number(file: LocalMediaFile) -> tuple[int | None, _NumberSource | Non
 def _title_dimension(
     local: LocalMediaFile,
     provider: ProviderTrack,
-    weight: float,
+    policy: MatchingPolicy,
 ) -> tuple[MatchEvidence, float | None, bool]:
-    local_title = _local_title(local)
+    local_title = effective_local_title(local)
+    weight = policy.track_mapping.title_weight
     provider_titles = tuple(
         cleaned
         for title in provider.titles
@@ -278,7 +291,7 @@ def _title_dimension(
             f"Best title similarity is {similarity * 100:.1f}% across {len(provider_titles)} provider variant(s).",
         ),
         similarity,
-        similarity >= 0.90,
+        similarity >= policy.track_mapping.minimum_content_title_similarity,
     )
 
 
@@ -422,7 +435,7 @@ def _assess_pair(
     title_evidence, title_similarity, title_supports = _title_dimension(
         local,
         provider,
-        mapping_policy.title_weight,
+        policy,
     )
     duration_evidence, duration_similarity, duration_supports, duration_conflicts = (
         _duration_dimension(local, provider, policy)
@@ -466,6 +479,7 @@ def _assess_pair(
         if substantive_weight > 0.0
         else 0.0
     )
+
     # Position contributes only a small additional weight. The separate
     # has_substantive_evidence flag prevents this always-available dimension
     # from matching two tracks when nothing else can actually be compared.
@@ -477,8 +491,8 @@ def _assess_pair(
     score = 100.0 * total_contribution / total_weight
 
     return _PairAssessment(
-        score=round(score, 6),
-        substantive_score=round(substantive_score, 6),
+        score=round(score, SCORE_DECIMAL_PLACES),
+        substantive_score=round(substantive_score, SCORE_DECIMAL_PLACES),
         substantive_dimension_count=len(available),
         has_substantive_evidence=bool(available),
         strong_contradiction=duration_conflicts or number_conflicts,
@@ -486,6 +500,9 @@ def _assess_pair(
         number_source=number_source,
         number_agrees=number_agrees,
         evidence=(title_evidence, duration_evidence, number_evidence, position_evidence),
+        title_similarity=title_similarity,
+        duration_similarity=duration_similarity,
+        number_similarity=number_similarity,
     )
 
 
@@ -539,16 +556,11 @@ def _anchor_candidates(
         provider_index = provider_numbers.index(local_number)
         assessment = assessments[local_index][provider_index]
 
-        if assessment.score < policy.track_mapping.high_pair_score:
-            continue
-
-        if assessment.strong_contradiction:
-            continue
-
-        # Existing tags become anchors only when title or duration independently
-        # supports the number. Filename numbers are already deliberately weaker
-        # evidence and may anchor an otherwise untagged, numbered file.
-        if source is _NumberSource.TAG and assessment.support_dimension_count == 0:
+        # An anchor becomes a hard ordering boundary for every later pair.
+        # Both tag and filename numbers therefore need independent content
+        # support. A discount on a filename score alone does not make forcing
+        # an uncorroborated hint safe; such hints stay reviewable suggestions.
+        if not _has_high_content_confidence(assessment, policy):
             continue
 
         candidates.append((local_index, provider_index))
@@ -581,6 +593,176 @@ def _select_anchor_chain(candidates: tuple[tuple[int, int], ...]) -> tuple[tuple
     return max(best_ending, key=lambda chain: (len(chain), tuple(reversed(chain))))
 
 
+def _is_eligible_pair(assessment: _PairAssessment, policy: MatchingPolicy) -> bool:
+    """Keep the existing score floor for useful, possibly reviewable pairs."""
+    return (
+        assessment.has_substantive_evidence
+        and assessment.score >= policy.track_mapping.minimum_pair_score
+    )
+
+
+def _has_high_content_confidence(assessment: _PairAssessment, policy: MatchingPolicy) -> bool:
+    """Check the shared content gate; ambiguity is resolved separately."""
+    score_is_high = assessment.score >= policy.track_mapping.high_pair_score
+    content_supports_identity = assessment.support_dimension_count > 0
+
+    return score_is_high and content_supports_identity and not assessment.strong_contradiction
+
+
+def _clearly_preferred(
+    first: _PairAssessment,
+    second: _PairAssessment,
+    policy: MatchingPolicy,
+) -> bool:
+    """Require discriminating observations, rather than extra observations."""
+    # A known large duration/tag contradiction is different from missing
+    # metadata. Keep that distinction even if the conflicting dimension is
+    # unavailable for the other candidate and so cannot be compared below.
+    if first.strong_contradiction != second.strong_contradiction:
+        return not first.strong_contradiction
+
+    mapping_policy = policy.track_mapping
+    comparisons = (
+        (mapping_policy.title_weight, first.title_similarity, second.title_similarity),
+        (mapping_policy.duration_weight, first.duration_similarity, second.duration_similarity),
+        (mapping_policy.track_number_weight, first.number_similarity, second.number_similarity),
+    )
+    shared = tuple(
+        (weight, first_value - second_value)
+        for weight, first_value, second_value in comparisons
+        if first_value is not None and second_value is not None
+    )
+
+    if not shared:
+        # Disjoint evidence cannot establish which identity is better. The
+        # solver may choose a reproducible path, but that is not corroboration.
+        return False
+
+    # Compare the same evidence denominator on both sides. Two equal titles
+    # remain equal when one provider omits duration, even if that omission
+    # raises its ordinary weighted score. Real shared duration differences
+    # still separate repeated titles. Position never participates here.
+    shared_weight = sum(weight for weight, _difference in shared)
+    advantage = 100.0 * sum(weight * difference for weight, difference in shared) / shared_weight
+
+    return advantage > mapping_policy.ambiguity_margin
+
+
+def _preferred_pair(
+    candidates: _PairIndexes,
+    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    policy: MatchingPolicy,
+) -> _PairIndex | None:
+    # A winner must beat every alternative using shared evidence. Sorting
+    # by ordinary scores would reintroduce differences caused by missing
+    # dimensions, and comparing only two rows can overlook a third rival.
+    for candidate in candidates:
+        assessment = assessments[candidate[0]][candidate[1]]
+        alternatives = (other for other in candidates if other != candidate)
+
+        if all(
+            _clearly_preferred(assessment, assessments[other[0]][other[1]], policy)
+            for other in alternatives
+        ):
+            return candidate
+
+    return None
+
+
+def _order_compatible(first: _PairIndex, second: _PairIndex) -> bool:
+    if first == second:
+        return True
+
+    if first[0] == second[0] or first[1] == second[1]:
+        return False
+
+    # A pair lies before its neighbour on both sides or after it on both.
+    # Equal rows/columns above would reuse a track; opposite order crosses it.
+    return (first[0] < second[0]) == (first[1] < second[1])
+
+
+def _competition_groups(
+    pairs: _PairIndexes,
+) -> tuple[_PairGroups, _PairGroups]:
+    """Index candidates once for the two directions of identity competition."""
+    rows: dict[int, list[_PairIndex]] = {}
+    columns: dict[int, list[_PairIndex]] = {}
+
+    for pair in pairs:
+        rows.setdefault(pair[0], []).append(pair)
+        columns.setdefault(pair[1], []).append(pair)
+
+    return (
+        tuple(tuple(group) for group in rows.values()),
+        tuple(tuple(group) for group in columns.values()),
+    )
+
+
+def _feasible_segment_pairs(
+    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    *,
+    local_start: int,
+    local_end: int,
+    provider_start: int,
+    provider_end: int,
+    policy: MatchingPolicy,
+) -> _PairIndexes:
+    plausible = tuple(
+        (local_index, provider_index)
+        for local_index in range(local_start, local_end)
+        for provider_index in range(provider_start, provider_end)
+        if _is_eligible_pair(assessments[local_index][provider_index], policy)
+    )
+    rows, columns = _competition_groups(plausible)
+    row_preferences = {_preferred_pair(group, assessments, policy) for group in rows}
+    column_preferences = {_preferred_pair(group, assessments, policy) for group in columns}
+    neighbours = tuple(
+        pair
+        for pair in plausible
+        if pair in row_preferences
+        and pair in column_preferences
+        and _has_high_content_confidence(assessments[pair[0]][pair[1]], policy)
+    )
+
+    # Only mutually unique, well-supported neighbours may exclude a rival.
+    # Conflicting neighbours are not settled by a positional tie-break: omit
+    # both as constraints and leave their competing paths to normal alignment.
+    compatible_neighbours = tuple(
+        pair
+        for pair in neighbours
+        if all(_order_compatible(pair, other) for other in neighbours)
+    )
+
+    return tuple(
+        pair
+        for pair in plausible
+        if all(_order_compatible(pair, neighbour) for neighbour in compatible_neighbours)
+    )
+
+
+def _ambiguous_from_pairs(
+    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    feasible: _PairIndexes,
+    policy: MatchingPolicy,
+) -> frozenset[int]:
+    ambiguous: set[int] = set()
+
+    # Check both directions. A local with two possible provider tracks and
+    # two locals sharing one possible provider track are both identity ties.
+    # Restricting this to the current anchor segment and supported neighbours
+    # preserves valid partial mappings on either side of a known track.
+    rows, columns = _competition_groups(feasible)
+
+    for candidates in (*rows, *columns):
+        if len(candidates) < 2:
+            continue
+
+        if _preferred_pair(candidates, assessments, policy) is None:
+            ambiguous.update(local_index for local_index, _provider_index in candidates)
+
+    return frozenset(ambiguous)
+
+
 def _ambiguous_locals(
     assessments: tuple[tuple[_PairAssessment, ...], ...],
     *,
@@ -590,41 +772,17 @@ def _ambiguous_locals(
     provider_end: int,
     policy: MatchingPolicy,
 ) -> frozenset[int]:
-    ambiguous: set[int] = set()
+    """Expose ambiguity exclusions separately for diagnostics and the oracle."""
+    feasible = _feasible_segment_pairs(
+        assessments,
+        local_start=local_start,
+        local_end=local_end,
+        provider_start=provider_start,
+        provider_end=provider_end,
+        policy=policy,
+    )
 
-    for local_index in range(local_start, local_end):
-        plausible = [
-            assessment
-            for assessment in assessments[local_index][provider_start:provider_end]
-            if assessment.has_substantive_evidence
-            and assessment.score >= policy.track_mapping.minimum_pair_score
-        ]
-
-        if len(plausible) < 2:
-            continue
-
-        # Check ambiguity using title/duration/number evidence before position.
-        # Otherwise two indistinguishable tracks could appear uniquely identified
-        # merely because one happens to occupy the expected row.
-        ranked = sorted(
-            plausible,
-            key=lambda item: (
-                item.substantive_score,
-                item.substantive_dimension_count,
-                item.score,
-            ),
-            reverse=True,
-        )
-        first, second = ranked[:2]
-
-        if (
-            first.substantive_dimension_count == second.substantive_dimension_count
-            and first.substantive_score - second.substantive_score
-            <= policy.track_mapping.ambiguity_margin
-        ):
-            ambiguous.add(local_index)
-
-    return frozenset(ambiguous)
+    return _ambiguous_from_pairs(assessments, feasible, policy)
 
 
 # Prefer the greatest accumulated reward. Treat nearly equal float totals
@@ -632,7 +790,11 @@ def _ambiguous_locals(
 # smallest pair sequence. This final rule makes repeated runs choose alike.
 def _better_state(*states: _AlignmentState) -> _AlignmentState:
     best_value = max(state.value for state in states)
-    tied = tuple(state for state in states if math.isclose(state.value, best_value, abs_tol=1e-9))
+    tied = tuple(
+        state
+        for state in states
+        if math.isclose(state.value, best_value, abs_tol=_ALIGNMENT_ABSOLUTE_TOLERANCE)
+    )
     greatest_count = max(len(state.pairs) for state in tied)
     finalists = tuple(state for state in tied if len(state.pairs) == greatest_count)
 
@@ -651,7 +813,7 @@ def _align_segment(
     local_count = local_end - local_start
     provider_count = provider_end - provider_start
     gap = policy.track_mapping.gap_penalty
-    ambiguous = _ambiguous_locals(
+    feasible = _feasible_segment_pairs(
         assessments,
         local_start=local_start,
         local_end=local_end,
@@ -659,6 +821,9 @@ def _align_segment(
         provider_end=provider_end,
         policy=policy,
     )
+    ambiguous = _ambiguous_from_pairs(assessments, feasible, policy)
+    permitted_pairs = frozenset(pair for pair in feasible if pair[0] not in ambiguous)
+
     # table[i][j] describes only the first i local and first j provider tracks
     # in this segment. Row/column zero represent empty prefixes; therefore the
     # table has one extra row and column beyond the number of tracks.
@@ -686,6 +851,7 @@ def _align_segment(
             provider_index = provider_start + provider_offset - 1
             local_gap_state = table[local_offset - 1][provider_offset]
             provider_gap_state = table[local_offset][provider_offset - 1]
+
             # An upward move skips one local file; a leftward move skips one
             # provider track. In both cases retain the previous accepted pairs
             # and subtract one gap penalty.
@@ -695,12 +861,11 @@ def _align_segment(
             )
             assessment = assessments[local_index][provider_index]
 
-            if (
-                local_index not in ambiguous
-                and assessment.has_substantive_evidence
-                and assessment.score >= policy.track_mapping.minimum_pair_score
-            ):
+            pair_is_allowed = (local_index, provider_index) in permitted_pairs
+
+            if pair_is_allowed:
                 previous = table[local_offset - 1][provider_offset - 1]
+
                 # A diagonal move consumes one track on each side. Only evidence
                 # above the minimum earns extra reward: score 85 at minimum 65
                 # adds 20. Even a zero-reward permitted pair avoids two gaps.
@@ -760,10 +925,48 @@ def _mapping_classification(
     assessment: _PairAssessment,
     policy: MatchingPolicy,
 ) -> MatchClassification:
-    if (
-        assessment.score >= policy.track_mapping.high_pair_score
-        and not assessment.strong_contradiction
-    ):
+    if _has_high_content_confidence(assessment, policy):
+        return MatchClassification.HIGH
+
+    return MatchClassification.REVIEW
+
+
+def _mapping_evidence(assessment: _PairAssessment) -> tuple[MatchEvidence, ...]:
+    if assessment.support_dimension_count > 0:
+        return assessment.evidence
+
+    # Keep the numerical suggestion visible while explaining why even score
+    # 100 cannot establish content identity from a number and a row position.
+    return (
+        *assessment.evidence,
+        _evidence(
+            MatchReasonCode.TRACK_CONTENT_SUPPORT_INSUFFICIENT,
+            0.0,
+            "No sufficiently similar title or close duration independently supports "
+            "this track identity; numbering and position alone require review.",
+        ),
+    )
+
+
+def classify_mapping_summary(
+    mappings: Sequence[TrackMapping],
+    *,
+    complete: bool,
+    listing_complete: bool,
+    ambiguous: bool = False,
+) -> MatchClassification:
+    """Share visible-row and listing confidence rules with manual review.
+
+    A manually approved pair may be HIGH independently of automatic evidence.
+    Neither manual approval nor complete supplied-row coverage proves that an
+    incomplete provider response contains every track or medium.
+    """
+    if not mappings:
+        return MatchClassification.REVIEW if ambiguous else MatchClassification.LOW
+
+    all_pairs_high = all(item.classification is MatchClassification.HIGH for item in mappings)
+
+    if complete and listing_complete and all_pairs_high and not ambiguous:
         return MatchClassification.HIGH
 
     return MatchClassification.REVIEW
@@ -774,6 +977,8 @@ def _summary_evidence(
     unmatched_local: tuple[str, ...],
     unmatched_provider: tuple[int, ...],
     ambiguous: frozenset[int],
+    *,
+    listing_complete: bool,
 ) -> tuple[MatchEvidence, ...]:
     ambiguity_evidence: tuple[MatchEvidence, ...]
 
@@ -782,7 +987,7 @@ def _summary_evidence(
             _evidence(
                 MatchReasonCode.TRACK_MAPPING_AMBIGUOUS,
                 0.0,
-                f"{len(ambiguous)} local track(s) had equally plausible provider candidates.",
+                f"{len(ambiguous)} local track(s) had unresolved competition for track identity.",
             ),
         )
     else:
@@ -792,7 +997,7 @@ def _summary_evidence(
         status = _evidence(
             MatchReasonCode.TRACK_MAPPING_COMPLETE,
             0.0,
-            f"All {len(mappings)} local/provider track pair(s) were mapped.",
+            f"All {len(mappings)} supplied local/provider track pair(s) were mapped.",
         )
     elif mappings:
         status = _evidence(
@@ -808,7 +1013,22 @@ def _summary_evidence(
             "No local/provider pair had enough unambiguous substantive evidence.",
         )
 
-    return (*ambiguity_evidence, status)
+    if listing_complete:
+        return (*ambiguity_evidence, status)
+
+    # Complete alignment of supplied rows is useful coverage information,
+    # while listing completeness is a separate provider contract. Keep both
+    # reasons and leave unknown totals to the domain's position projections.
+    return (
+        *ambiguity_evidence,
+        status,
+        _evidence(
+            MatchReasonCode.PROVIDER_LIST_INCOMPLETE,
+            0.0,
+            "The selected track listing or release medium listing is incomplete; "
+            "mapping supplied rows does not establish complete release identity.",
+        ),
+    )
 
 
 def map_tracks(
@@ -854,6 +1074,7 @@ def map_tracks(
         provider_count=len(medium.tracks),
         policy=policy,
     )
+
     # Translate alignment indexes back to stable file identities and source
     # positions. Medium/release helpers supply trustworthy numbering and totals;
     # a list index alone is never promoted into a tag value.
@@ -868,10 +1089,11 @@ def map_tracks(
                 assessments[local_index][provider_index],
                 policy,
             ),
-            evidence=assessments[local_index][provider_index].evidence,
+            evidence=_mapping_evidence(assessments[local_index][provider_index]),
         )
         for local_index, provider_index in pair_indexes
     )
+
     # Take each complement independently: a missing local file and an extra
     # provider bonus track are different unresolved items and both stay visible.
     mapped_local_indexes = {local_index for local_index, _provider_index in pair_indexes}
@@ -886,22 +1108,24 @@ def map_tracks(
         for index in range(len(medium.tracks))
         if index not in mapped_provider_indexes
     )
-    evidence = _summary_evidence(mappings, unmatched_local, unmatched_provider, ambiguous)
+    listing_complete = medium.tracks_complete and release.media_complete
+    evidence = _summary_evidence(
+        mappings,
+        unmatched_local,
+        unmatched_provider,
+        ambiguous,
+        listing_complete=listing_complete,
+    )
 
     if order_notice is not None:
         evidence = (MatchEvidence(order_notice.code, 0.0, order_notice.detail), *evidence)
 
-    if (
-        mappings
-        and not unmatched_local
-        and not unmatched_provider
-        and all(mapping.classification is MatchClassification.HIGH for mapping in mappings)
-    ):
-        classification = MatchClassification.HIGH
-    elif mappings or ambiguous:
-        classification = MatchClassification.REVIEW
-    else:
-        classification = MatchClassification.LOW
+    classification = classify_mapping_summary(
+        mappings,
+        complete=not unmatched_local and not unmatched_provider,
+        listing_complete=listing_complete,
+        ambiguous=bool(ambiguous),
+    )
 
     return TrackMappingResult(
         mappings=mappings,

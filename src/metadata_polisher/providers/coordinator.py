@@ -224,6 +224,25 @@ def _candidate_identity(candidate: ReleaseCandidate) -> CandidateIdentity:
     return candidate.engine_id, candidate.source_id, candidate.release_id
 
 
+def _has_conflicting_candidate_payloads(candidates: tuple[ReleaseCandidate, ...]) -> bool:
+    """Reject contradictory versions of one record within a single response."""
+    payloads: dict[CandidateIdentity, ReleaseCandidate] = {}
+
+    for candidate in candidates:
+        identity = _candidate_identity(candidate)
+        previous = payloads.get(identity)
+
+        # Compare complete frozen payloads, including every medium and listing
+        # flag. Choosing one matching medium could conceal a different sibling
+        # disc, and choosing the first repeated row would depend on array order.
+        if previous is not None and previous != candidate:
+            return True
+
+        payloads[identity] = candidate
+
+    return False
+
+
 def _contains_composers(candidate: ReleaseCandidate) -> bool:
     return any(
         track.composers
@@ -356,7 +375,13 @@ class ProviderCoordinator:
 
                     continue
 
-                if any(candidate.engine_id != engine_id for candidate in provider_candidates):
+                has_foreign_engine = any(candidate.engine_id != engine_id for candidate in provider_candidates)
+                has_payload_conflict = _has_conflicting_candidate_payloads(provider_candidates)
+
+                # Validate the entire response before publishing its first hit or
+                # reporting success. A contradictory response fails atomically;
+                # other queries/providers remain independent opportunities.
+                if has_foreign_engine or has_payload_conflict:
                     issue = _invalid_response_issue()
                     failures.append(
                         ProviderFailure(
@@ -394,6 +419,10 @@ class ProviderCoordinator:
                     existing = candidates[existing_index]
 
                     if provenance in existing.provenance:
+                        # Queries have an explicit strict-to-broad priority.
+                        # Retain the first valid snapshot across those separate
+                        # responses; never merge fields by incidental richness.
+                        # Conflicts *within* one response were rejected above.
                         continue
 
                     # The first provider remains the display representative. Later

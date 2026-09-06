@@ -34,7 +34,7 @@ from metadata_polisher.matching.release_scoring import (
     MatchReasonCode,
     order_local_track_files,
 )
-from metadata_polisher.matching.track_mapping import TrackMapping, TrackMappingResult
+from metadata_polisher.matching.track_mapping import TrackMapping, TrackMappingResult, classify_mapping_summary
 from metadata_polisher.providers.coordinator import CoordinatedCandidate
 from metadata_polisher.rename.template import FilenameRenderPolicy
 
@@ -1344,20 +1344,32 @@ def set_manual_track_assignment(
     used_provider = {item.provider_track_index for item in updated_mappings}
     unmatched_provider = tuple(index for index in range(len(medium.tracks)) if index not in used_provider)
     complete = bool(updated_mappings) and not unmatched_local and not unmatched_provider
+    listing_complete = medium.tracks_complete and candidate.media_complete
 
-    if complete and all(item.classification is MatchClassification.HIGH for item in updated_mappings):
-        classification = MatchClassification.HIGH
-    elif updated_mappings:
-        classification = MatchClassification.REVIEW
-    else:
-        classification = MatchClassification.LOW
+    # A human can confirm one association without proving that the catalogue
+    # supplied every track or disc. Reuse the mapper's summary rule so manual
+    # review cannot promote an incomplete provider listing to overall HIGH.
+    classification = classify_mapping_summary(
+        updated_mappings, complete=complete, listing_complete=listing_complete,
+    )
 
     # Automatic completeness and ambiguity summaries describe the old partition.
     # Recalculate them from the current assignments while retaining pair evidence
     # and any independent diagnostic facts already attached to the result.
     evidence = tuple(item for item in mapping.evidence if item.code not in _MAPPING_SUMMARY_CODES)
+    retained_codes = {item.code for item in evidence}
 
-    if order_notice is not None and order_notice.code not in {item.code for item in evidence}:
+    # Ordinarily the automatic mapper supplies this evidence already. Typed
+    # callers may supply older/manual mappings, so establish the same fact here
+    # without duplicating an existing warning or inventing unknown tag totals.
+    if not listing_complete and MatchReasonCode.PROVIDER_LIST_INCOMPLETE not in retained_codes:
+        evidence = (*evidence, MatchEvidence(
+            MatchReasonCode.PROVIDER_LIST_INCOMPLETE,
+            0.0,
+            "The provider track or media listing is incomplete; confirming pairs does not establish missing rows.",
+        ))
+
+    if order_notice is not None and order_notice.code not in retained_codes:
         evidence = (*evidence, MatchEvidence(order_notice.code, 0.0, order_notice.detail))
 
     summary = MatchEvidence(

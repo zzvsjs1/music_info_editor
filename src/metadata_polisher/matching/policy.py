@@ -3,6 +3,11 @@
 import math
 from dataclasses import dataclass, field
 
+# Scores and displayed contributions share a stable presentation precision.
+# Calculations must keep full precision until this output boundary; changing
+# display rounding must never change which evidence is available or trusted.
+SCORE_DECIMAL_PLACES = 6
+
 
 def _finite_number(name: str, value: object, *, minimum: float = 0.0) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -51,6 +56,7 @@ class ClassificationThresholds:
     high: float = 85.0
     review: float = 65.0
     ambiguity_margin: float = 5.0
+
     # Coverage is a fraction, unlike the 0..100 score thresholds above.
     # For example, six usable ordered title pairs out of ten meet 0.60.
     minimum_high_track_title_coverage: float = 0.60
@@ -78,22 +84,36 @@ class ClassificationThresholds:
 
 @dataclass(frozen=True)
 class TrackMappingPolicy:
-    """All weights and boundaries used by deterministic track-pair alignment."""
+    """Weights and boundaries for suggestions, independent identity and gaps.
+
+    A score is an evidence-weighted ranking value, not a probability. Reaching
+    ``high_pair_score`` is necessary for HIGH but cannot replace content
+    support, resolve competing identities or cancel a strong contradiction.
+    """
 
     close_duration_seconds: float = 3.0
     large_duration_mismatch_seconds: float = 10.0
+
     title_weight: float = 55.0
     duration_weight: float = 20.0
     track_number_weight: float = 20.0
     sequence_position_weight: float = 5.0
+
     # Discount an agreeing filename number while leaving a real tag at full
     # weight. Gap penalty prices a skipped track during sequence alignment;
     # it is separate from the minimum score required to allow a pair.
     filename_number_factor: float = 0.85
+
     minimum_pair_score: float = 65.0
     high_pair_score: float = 85.0
     ambiguity_margin: float = 5.0
     gap_penalty: float = 4.0
+
+    # The same title gate corroborates numbered anchors and pair-level HIGH.
+    # An exact/near-exact title or a duration within close_duration_seconds
+    # supplies content support; numbers and sequence position do not. Keep
+    # this separate from the looser score floor for reviewable suggestions.
+    minimum_content_title_similarity: float = 0.90
 
     def __post_init__(self) -> None:
         close = _finite_number("close_duration_seconds", self.close_duration_seconds)
@@ -125,9 +145,16 @@ class TrackMappingPolicy:
         minimum_score = _finite_number("minimum_pair_score", self.minimum_pair_score)
         high_score = _finite_number("high_pair_score", self.high_pair_score)
         ambiguity_margin = _finite_number("ambiguity_margin", self.ambiguity_margin)
+        content_similarity = _finite_number(
+            "minimum_content_title_similarity",
+            self.minimum_content_title_similarity,
+        )
 
         if filename_factor > 1.0:
             raise ValueError("filename_number_factor must be between zero and one")
+
+        if content_similarity > 1.0:
+            raise ValueError("minimum_content_title_similarity must be between zero and one")
 
         if minimum_score > high_score or high_score > 100.0:
             raise ValueError("track mapping scores must satisfy minimum <= high <= 100")
@@ -136,6 +163,7 @@ class TrackMappingPolicy:
         object.__setattr__(self, "minimum_pair_score", minimum_score)
         object.__setattr__(self, "high_pair_score", high_score)
         object.__setattr__(self, "ambiguity_margin", ambiguity_margin)
+        object.__setattr__(self, "minimum_content_title_similarity", content_similarity)
 
         object.__setattr__(self, "close_duration_seconds", close)
         object.__setattr__(self, "large_duration_mismatch_seconds", large)
