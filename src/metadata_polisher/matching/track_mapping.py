@@ -1,10 +1,11 @@
 """Order-preserving local-to-provider track alignment with explainable evidence."""
 
 import math
+from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import cast
+from typing import Protocol, cast
 
 from rapidfuzz.fuzz import ratio
 
@@ -191,6 +192,44 @@ class _PairAssessment:
     title_similarity: float | None = None
     duration_similarity: float | None = None
     number_similarity: float | None = None
+
+
+class _AssessmentRow(Protocol):
+    """Read-only indexed evidence, supplied eagerly by tests or lazily below."""
+
+    def __getitem__(self, index: int, /) -> _PairAssessment: ...
+
+
+type _AssessmentMatrix = Sequence[_AssessmentRow]
+
+
+@dataclass
+class _LazyAssessmentRow:
+    """Cache only the pairs inspected during this one mapping operation."""
+
+    local: LocalMediaFile
+    providers: tuple[ProviderTrack, ...]
+    local_index: int
+    local_count: int
+    policy: MatchingPolicy
+    cache: dict[int, _PairAssessment] = field(default_factory=dict, init=False)
+
+    def __getitem__(self, index: int, /) -> _PairAssessment:
+        assessment = self.cache.get(index)
+
+        if assessment is None:
+            assessment = _assess_pair(
+                self.local,
+                self.providers[index],
+                local_index=self.local_index,
+                provider_index=index,
+                local_count=self.local_count,
+                provider_count=len(self.providers),
+                policy=self.policy,
+            )
+            self.cache[index] = assessment
+
+        return assessment
 
 
 # value is the accumulated alignment reward after gap penalties; pairs is
@@ -506,26 +545,21 @@ def _assess_pair(
     )
 
 
-# Precompute every local/provider pair once. Anchors, ambiguity checks and
-# alignment then share identical evidence instead of recalculating scores
-# with potentially different inputs along different paths.
+# Anchors, ambiguity checks and alignment share one operation-local cache.
+# Trusted anchors rule out all crossing pairs before alignment; calculating
+# those unused pairs upfront makes even an exact numbered album quadratic.
 def _build_assessment_matrix(
     local_files: tuple[LocalMediaFile, ...],
     provider_tracks: tuple[ProviderTrack, ...],
     policy: MatchingPolicy,
-) -> tuple[tuple[_PairAssessment, ...], ...]:
+) -> _AssessmentMatrix:
     return tuple(
-        tuple(
-            _assess_pair(
-                local,
-                provider,
-                local_index=local_index,
-                provider_index=provider_index,
-                local_count=len(local_files),
-                provider_count=len(provider_tracks),
-                policy=policy,
-            )
-            for provider_index, provider in enumerate(provider_tracks)
+        _LazyAssessmentRow(
+            local=local,
+            providers=provider_tracks,
+            local_index=local_index,
+            local_count=len(local_files),
+            policy=policy,
         )
         for local_index, local in enumerate(local_files)
     )
@@ -534,11 +568,14 @@ def _build_assessment_matrix(
 def _anchor_candidates(
     local_files: tuple[LocalMediaFile, ...],
     provider_tracks: tuple[ProviderTrack, ...],
-    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    assessments: _AssessmentMatrix,
     policy: MatchingPolicy,
 ) -> tuple[tuple[int, int], ...]:
     local_numbers = tuple(_local_number(file) for file in local_files)
     provider_numbers = tuple(_positive_integer(track.track_number) for track in provider_tracks)
+    local_number_counts = Counter(number for number, _source in local_numbers)
+    provider_number_counts = Counter(provider_numbers)
+    provider_indexes = {number: index for index, number in enumerate(provider_numbers)}
     candidates: list[tuple[int, int]] = []
 
     for local_index, (local_number, source) in enumerate(local_numbers):
@@ -547,13 +584,13 @@ def _anchor_candidates(
 
         # Repeated numbers cannot identify an anchor uniquely on either side.
         # They remain available to the later sequence alignment instead.
-        if sum(number == local_number for number, _item_source in local_numbers) != 1:
+        if local_number_counts[local_number] != 1:
             continue
 
-        if sum(number == local_number for number in provider_numbers) != 1:
+        if provider_number_counts[local_number] != 1:
             continue
 
-        provider_index = provider_numbers.index(local_number)
+        provider_index = provider_indexes[local_number]
         assessment = assessments[local_index][provider_index]
 
         # An anchor becomes a hard ordering boundary for every later pair.
@@ -576,6 +613,16 @@ def _select_anchor_chain(candidates: tuple[tuple[int, int], ...]) -> tuple[tuple
     # must increase, so two anchors can never force the later alignment to cross.
     # For each candidate, retain the best chain ending at that candidate.
     ordered = tuple(sorted(candidates))
+
+    # When every anchor already follows both sequences, the entire sequence
+    # is the unique longest chain. Avoid building every shorter prefix merely
+    # to rediscover it; crossing or repeated indexes still use the same solver.
+    if all(
+        left[0] < right[0] and left[1] < right[1]
+        for left, right in zip(ordered, ordered[1:], strict=False)
+    ):
+        return ordered
+
     best_ending: list[tuple[tuple[int, int], ...]] = []
 
     for candidate in ordered:
@@ -650,7 +697,7 @@ def _clearly_preferred(
 
 def _preferred_pair(
     candidates: _PairIndexes,
-    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    assessments: _AssessmentMatrix,
     policy: MatchingPolicy,
 ) -> _PairIndex | None:
     # A winner must beat every alternative using shared evidence. Sorting
@@ -699,7 +746,7 @@ def _competition_groups(
 
 
 def _feasible_segment_pairs(
-    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    assessments: _AssessmentMatrix,
     *,
     local_start: int,
     local_end: int,
@@ -741,7 +788,7 @@ def _feasible_segment_pairs(
 
 
 def _ambiguous_from_pairs(
-    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    assessments: _AssessmentMatrix,
     feasible: _PairIndexes,
     policy: MatchingPolicy,
 ) -> frozenset[int]:
@@ -764,7 +811,7 @@ def _ambiguous_from_pairs(
 
 
 def _ambiguous_locals(
-    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    assessments: _AssessmentMatrix,
     *,
     local_start: int,
     local_end: int,
@@ -802,7 +849,7 @@ def _better_state(*states: _AlignmentState) -> _AlignmentState:
 
 
 def _align_segment(
-    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    assessments: _AssessmentMatrix,
     *,
     local_start: int,
     local_end: int,
@@ -823,6 +870,11 @@ def _align_segment(
     )
     ambiguous = _ambiguous_from_pairs(assessments, feasible, policy)
     permitted_pairs = frozenset(pair for pair in feasible if pair[0] not in ambiguous)
+
+    # With no permitted matches, every possible path only skips tracks.
+    # Its private reward cannot affect the returned empty path or ambiguity.
+    if not permitted_pairs:
+        return (), ambiguous
 
     # table[i][j] describes only the first i local and first j provider tracks
     # in this segment. Row/column zero represent empty prefixes; therefore the
@@ -882,7 +934,7 @@ def _align_segment(
 
 
 def _align_around_anchors(
-    assessments: tuple[tuple[_PairAssessment, ...], ...],
+    assessments: _AssessmentMatrix,
     anchors: tuple[tuple[int, int], ...],
     *,
     local_count: int,

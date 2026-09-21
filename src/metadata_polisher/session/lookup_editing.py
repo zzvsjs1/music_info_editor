@@ -36,23 +36,56 @@ def _replace_group(state: SessionState, current: GroupState, replacement: GroupS
 def change_language(
     state: SessionState,
     group_id: str,
-    language: str,
+    language: str | None,
     rename_settings: RenameSettings,
+    *,
+    settings_language: str = "auto",
 ) -> SessionState:
     """Rerank loaded variants while preserving explicit decisions and provenance."""
     current = _group_for_edit(state, group_id)
 
-    if not isinstance(language, str) or not language.strip():
+    if language is not None and (not isinstance(language, str) or not language.strip()):
         raise ValueError("Choose a non-blank language preference.")
+
+    if not isinstance(settings_language, str) or not settings_language.strip():
+        raise ValueError("Settings must supply a non-blank language preference.")
 
     if not isinstance(rename_settings, RenameSettings):
         raise TypeError("rename_settings must be RenameSettings")
 
-    requested = language.strip().casefold()
+    requested = language.strip().casefold() if language is not None else None
 
     if current.language_override == requested:
         return state
 
+    return _rerank_language(state, current, requested, requested or settings_language, rename_settings)
+
+
+def refresh_inherited_language(
+    state: SessionState,
+    settings_language: str,
+    rename_settings: RenameSettings,
+) -> SessionState:
+    """Apply a changed Settings preference only to reviews that inherit it."""
+    if state.active_operation is not None:
+        raise ValueError("Wait for the current operation before editing lookup options.")
+
+    # Explicit Auto is a deliberate local-style preference. It must survive a
+    # change to Settings just like an explicit Japanese or English override.
+    for group in state.groups:
+        if group.language_override is None and group.reviewed_files:
+            state = _rerank_language(state, group, None, settings_language, rename_settings)
+
+    return state
+
+
+def _rerank_language(
+    state: SessionState,
+    current: GroupState,
+    override: str | None,
+    preferred_language: str,
+    rename_settings: RenameSettings,
+) -> SessionState:
     # Language changes rerank already loaded variants locally. They do not fetch
     # new provider text or translate values absent from the retained evidence.
     local_texts = build_local_review_texts(current.group.files)
@@ -71,7 +104,7 @@ def change_language(
         reviews = tuple(
             rerank_field_review_state(
                 review,
-                preferred_language=requested,
+                preferred_language=preferred_language,
                 local_texts=local_texts.get(review.field, ()),
                 language_profile_texts=language_profile_texts,
             )
@@ -102,7 +135,7 @@ def change_language(
     # evidence, so retain that evidence and discard only the automatic receipt.
     replacement = replace(
         current,
-        language_override=requested,
+        language_override=override,
         reviewed_files=tuple(rebuilt_by_id.get(reviewed.file_id, reviewed) for reviewed in reviewed_files),
         selected_metadata=None,
         revision=current.revision + 1,
@@ -123,7 +156,12 @@ def set_search_query_override(
     if query is not None and not isinstance(query, ReleaseSearchQuery):
         raise TypeError("query must be ReleaseSearchQuery or None")
 
-    if current.search_query_override == query:
+    effective_query = current.search_query_override or build_release_search_query(current.group)
+    requested_query = query or build_release_search_query(current.group)
+
+    # The first dialogue displays derived local terms while the stored override
+    # is None. Accepting those same terms supplies no new matching evidence.
+    if effective_query == requested_query:
         return state
 
     # New search terms invalidate the selected release and its track evidence.
@@ -140,6 +178,7 @@ def set_search_query_override(
         reviewed_files=local_reviews_after_lookup_reset(state, current, rename_settings),
         selected_metadata=None,
         selection_failure=None,
+        search_failure=None,
         revision=current.revision + 1,
     )
 
@@ -179,7 +218,10 @@ def incomplete_searchable_group_ids(state: SessionState) -> tuple[str, ...]:
     )
 
 
-def available_language_choices(group: GroupState | None) -> tuple[tuple[str, str], ...]:
+def available_language_choices(
+    group: GroupState | None,
+    settings_language: str = "auto",
+) -> tuple[tuple[str | None, str], ...]:
     """Expose supplied variants, including declared romanisation, without inventing text."""
     languages: set[str] = set()
 
@@ -204,7 +246,15 @@ def available_language_choices(group: GroupState | None) -> tuple[tuple[str, str
         languages.add(group.language_override)
 
     labels = {
+        "auto": "Auto",
         "ja": "Japanese", "jpn": "Japanese", "en": "English", "eng": "English",
         "rom": "Romanised", "romanised": "Romanised",
     }
-    return (("auto", "Auto"), *((value, labels.get(value, value)) for value in sorted(languages - {"auto"})))
+    inherited = settings_language.strip().casefold()
+    inherited_label = labels.get(inherited, inherited)
+
+    return (
+        (None, f"Use Settings ({inherited_label})"),
+        ("auto", "Auto"),
+        *((value, labels.get(value, value)) for value in sorted(languages - {"auto"})),
+    )

@@ -4,14 +4,19 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Slot
-from PySide6.QtWidgets import QDialog, QFileDialog
+from PySide6.QtCore import QObject, Qt, Slot
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from metadata_polisher.application.scanning import ScanLibraryResult, ScanLibraryService
 from metadata_polisher.execution.cancellation import CancellationToken
 from metadata_polisher.execution.events import OperationEventSink
 from metadata_polisher.infrastructure.settings import GeneralSettings, load_settings, save_settings
-from metadata_polisher.session.group_editing import merge_session_groups, set_disc_override, split_session_group
+from metadata_polisher.session.group_editing import (
+    merge_session_groups,
+    regroup_candidate_decisions,
+    set_disc_override,
+    split_session_group,
+)
 from metadata_polisher.session.state import GroupSelection, OperationKind, UnsupportedSelection, set_selection
 from metadata_polisher.ui.dialogs.group_dialogs import DiscOverrideDialog, MergeGroupsDialog
 from metadata_polisher.ui.main_window import MainWindow
@@ -157,6 +162,22 @@ class LibraryController(QObject):
     def _failed(self, operation_id: str, error: object) -> None:
         self._show_issue(f"{operation_id} failed: {error}")
 
+    def _regroup_review_warning(self, group_ids: tuple[str, ...]) -> str:
+        state = self._window.session_state
+        groups = tuple(group for group in state.groups if group.group.group_id in group_ids)
+        candidates = regroup_candidate_decisions(state, group_ids)
+        mappings = sum(group.manual_track_mapping is not None for group in groups)
+
+        if not candidates and not mappings and not any(group.selected_release is not None for group in groups):
+            return ""
+
+        return (
+            "Regrouping clears the selected releases and track mappings. "
+            f"{candidates} candidate field choices will require review again; "
+            f"{mappings} manual track mappings will be removed. "
+            "Manual values, Clear, Keep existing and filename choices are retained."
+        )
+
     @Slot()
     def split_group(self) -> None:
         state = self._window.session_state
@@ -167,12 +188,30 @@ class LibraryController(QObject):
         try:
             # The service enforces unique membership using stable file IDs. Qt
             # only supplies the highlighted subset and renders the returned groups.
-            updated = split_session_group(state, state.selection.group_id, self._window.selected_file_ids())
+            updated = split_session_group(
+                state, state.selection.group_id, self._window.selected_file_ids(), self.settings.rename,
+            )
         except ValueError as error:
             self._show_issue(str(error))
             return
 
-        self._window.set_session_state(updated)
+        warning = self._regroup_review_warning((state.selection.group_id,))
+
+        if warning:
+            dialog = QMessageBox(self._window)
+            dialog.setWindowTitle("Split group and reset matching?")
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setTextFormat(Qt.TextFormat.PlainText)
+            dialog.setText(warning)
+            dialog.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            dialog.setEscapeButton(QMessageBox.StandardButton.Cancel)
+
+            if dialog.exec() != QMessageBox.StandardButton.Ok:
+                return
+
+        if self._window.session_state is state:
+            self._window.set_session_state(updated)
 
     @Slot()
     def merge_groups(self) -> None:
@@ -183,10 +222,18 @@ class LibraryController(QObject):
         if state.active_operation is not None or len(groups) < 2:
             return
 
-        dialog = MergeGroupsDialog(groups, self._window)
+        try:
+            # Validate and prepare before confirmation. In particular, a stale
+            # group cannot absorb a healthy group's pending local decisions.
+            updated = merge_session_groups(state, ids, self.settings.rename)
+        except ValueError as error:
+            self._show_issue(str(error))
+            return
 
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._window.set_session_state(merge_session_groups(state, ids))
+        dialog = MergeGroupsDialog(groups, self._window, review_warning=self._regroup_review_warning(ids))
+
+        if dialog.exec() == QDialog.DialogCode.Accepted and self._window.session_state is state:
+            self._window.set_session_state(updated)
 
     @Slot()
     def disc_override(self) -> None:

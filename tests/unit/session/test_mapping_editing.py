@@ -109,7 +109,9 @@ def test_same_provider_choice_survives_manual_mapping_confidence_change():
 
 @pytest.mark.parametrize("invalidate", [
     lambda state: set_disc_override(state, "album", 2),
-    lambda state: set_search_query_override(state, "album", state.groups[0].lookup_result.queries[0]),
+    lambda state: set_search_query_override(
+        state, "album", replace(state.groups[0].lookup_result.queries[0], album="A different album"),
+    ),
 ])
 def test_lookup_invalidation_clears_manual_mapping(invalidate):
     state = partial_session()

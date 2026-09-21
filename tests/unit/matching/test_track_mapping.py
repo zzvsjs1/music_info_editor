@@ -2,6 +2,7 @@ import math
 import random
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,6 +14,7 @@ from metadata_polisher.domain.matching import (
 )
 from metadata_polisher.domain.media import FilenameHints, LocalMediaFile, MediaReadResult, StreamInfo
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField, MetadataSnapshot, Position
+from metadata_polisher.matching import track_mapping
 from metadata_polisher.matching.policy import DEFAULT_MATCHING_POLICY, MatchingPolicy, TrackMappingPolicy
 from metadata_polisher.matching.release_scoring import MatchClassification, MatchReasonCode
 from metadata_polisher.matching.track_mapping import (
@@ -20,9 +22,9 @@ from metadata_polisher.matching.track_mapping import (
     _align_segment,
     _ambiguous_locals,
     _anchor_candidates,
+    _AssessmentMatrix,
     _build_assessment_matrix,
     _feasible_segment_pairs,
-    _PairAssessment,
     map_tracks,
 )
 
@@ -619,7 +621,7 @@ def test_close_duration_content_boundary_is_shared_by_anchors_and_classification
 
 
 def _enumerated_segment_optimum(
-    matrix: tuple[tuple[_PairAssessment, ...], ...],
+    matrix: _AssessmentMatrix,
     allowed: frozenset[tuple[int, int]],
     *,
     local_count: int,
@@ -693,3 +695,38 @@ def test_segment_objective_matches_independent_enumeration_of_250_native_cases()
 
         assert actual == expected, f"Native alignment case {case}: {local_count} by {provider_count}"
         assert returned_ambiguous == ambiguous
+
+
+@pytest.mark.parametrize("missing", [None, 1, 20, 40])
+def test_numbered_album_assesses_only_needed_pairs(monkeypatch: pytest.MonkeyPatch, missing: int | None) -> None:
+    count = 40
+    local = tuple(
+        make_local(str(number), title=f"Theme {number}", tagged_number=number)
+        for number in range(1, count + 1)
+        if number != missing
+    )
+    release = make_release(*(make_provider(number, f"Theme {number}") for number in range(1, count + 1)))
+    counted = Mock(wraps=track_mapping._assess_pair)
+    monkeypatch.setattr(track_mapping, "_assess_pair", counted)
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert mapping_pairs(result) == tuple((file.file_id, int(file.file_id) - 1) for file in local)
+    assert result.unmatched_provider_indexes == (() if missing is None else (missing - 1,))
+    # Each trusted numbered pair needs one assessment; crossings already
+    # excluded by those anchors must not incur the full 40 by 40 matrix cost.
+    assert counted.call_count == len(local)
+
+
+def test_fully_ambiguous_album_skips_alignment_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    local = tuple(make_local(str(index), title="Repeated theme", tagged_number=None) for index in range(20))
+    release = make_release(*(make_provider(None, "Repeated theme") for _ in local))
+
+    def unexpected_alignment(*_args: object) -> None:
+        pytest.fail("No permitted pairs remain, so no alignment table is needed")
+
+    monkeypatch.setattr(track_mapping, "_better_state", unexpected_alignment)
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert result.mappings == ()
+    assert result.classification is MatchClassification.REVIEW
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS in result.reason_codes

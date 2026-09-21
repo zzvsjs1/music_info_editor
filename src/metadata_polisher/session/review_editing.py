@@ -424,6 +424,68 @@ def local_reviews_after_lookup_reset(
     return rebuild_reviewed_files(state, group, retained, rename_settings, rename_decisions=rename_decisions)
 
 
+def regrouped_review_undo(
+    state: SessionState, affected_file_ids: frozenset[str], rename_settings: RenameSettings,
+) -> tuple[ReviewUndoEntry, ...]:
+    """Retain local Undo actions after group membership invalidates provider data.
+
+    History follows the unchanged source identity, rather than the retired group
+    ID. Rebuild both sides against local metadata so Undo cannot resurrect an old
+    release, proposal or mapping. Candidate-only actions have nothing to restore.
+    """
+    sources = {source.file_id: (group, source) for group in state.groups for source in group.group.files}
+    independent = {FieldDecisionKind.KEEP_EXISTING, FieldDecisionKind.USE_MANUAL, FieldDecisionKind.CLEAR}
+    history = []
+
+    for entry in state.review_undo:
+        retained = []
+
+        for item in entry.files:
+            file_id = item.source.file_id
+
+            if file_id not in affected_file_ids:
+                retained.append(item)
+                continue
+
+            located = sources.get(file_id)
+
+            if located is None or located[1] != item.source:
+                continue
+
+            before_fields = {review.field: review for review in item.before.reviews}
+            after_fields = {review.field: review for review in item.after.reviews}
+            local_changes = any(
+                before_fields[field] != after_fields[field]
+                and any(review.decision_origin is DecisionOrigin.USER and review.decision in independent
+                        for review in (before_fields[field], after_fields[field]))
+                for field in before_fields
+            )
+
+            if not local_changes and _rename_intent(item.before) is _rename_intent(item.after):
+                continue
+
+            group, source = located
+            fresh = _local_reviews(source)
+            projected = []
+
+            for previous in (item.before, item.after):
+                old_fields = {review.field: review for review in previous.reviews}
+                reviews = tuple(retain_user_decision(
+                    old_fields[review.field], review, candidate_dependency_unchanged=False,
+                ) for review in fresh.reviews)
+                projected.append(rebuild_reviewed_files(
+                    state, group, (replace(fresh, reviews=reviews),), rename_settings,
+                    rename_decisions={file_id: _rename_intent(previous)},
+                )[0])
+
+            retained.append(ReviewUndoFile(source, projected[0], projected[1]))
+
+        if retained:
+            history.append(ReviewUndoEntry(tuple(retained)))
+
+    return tuple(history)
+
+
 def reconcile_lookup_reviews(
     state: SessionState, previous: GroupState, fresh: GroupState, rename_settings: RenameSettings,
 ) -> GroupState:

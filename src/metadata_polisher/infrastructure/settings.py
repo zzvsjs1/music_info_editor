@@ -7,6 +7,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
+from metadata_polisher.rename.template import MAXIMUM_PADDING_DIGITS, FilenameRenderPolicy
+
 SETTINGS_SCHEMA_VERSION = 1
 DEFAULT_RENAME_TEMPLATE = "[%discnumber%.]%tracknumber%. %title%"
 
@@ -26,6 +28,11 @@ class RenameSettings:
     template: str = DEFAULT_RENAME_TEMPLATE
     minimum_track_digits: int = 2
     minimum_disc_digits: int = 1
+
+    def __post_init__(self) -> None:
+        # Settings can also come from typed callers, bypassing JSON validation.
+        # Reject unsafe padding before a preview or a spin box can consume it.
+        FilenameRenderPolicy(self.minimum_track_digits, self.minimum_disc_digits)
 
 
 @dataclass(frozen=True)
@@ -226,7 +233,7 @@ def _read_non_negative_int(
     return default
 
 
-def _read_positive_int(
+def _read_padding_digits(
     section: Mapping[str, object],
     key: str,
     default: int,
@@ -238,10 +245,14 @@ def _read_positive_int(
     if value is _MISSING:
         return default
 
-    if type(value) is int and value > 0:
+    if type(value) is int and 1 <= value <= MAXIMUM_PADDING_DIGITS:
         return value
 
-    warnings.append(_invalid_warning(path))
+    # Restore this leaf's ordinary default and explain the change. The loader
+    # never rewrites the source file or silently clamps an oversized preference.
+    warnings.append(
+        f"Invalid value for '{path}'; use 1 to {MAXIMUM_PADDING_DIGITS} digits. Using the default ({default}).",
+    )
     return default
 
 
@@ -383,14 +394,14 @@ def _parse_settings(document: Mapping[str, object]) -> tuple[AppSettings, tuple[
         rename=RenameSettings(
             enabled=_read_bool(rename, "enabled", defaults.rename.enabled, "rename.enabled", warnings),
             template=_read_string(rename, "template", defaults.rename.template, "rename.template", warnings),
-            minimum_track_digits=_read_positive_int(
+            minimum_track_digits=_read_padding_digits(
                 rename,
                 "minimum_track_digits",
                 defaults.rename.minimum_track_digits,
                 "rename.minimum_track_digits",
                 warnings,
             ),
-            minimum_disc_digits=_read_positive_int(
+            minimum_disc_digits=_read_padding_digits(
                 rename,
                 "minimum_disc_digits",
                 defaults.rename.minimum_disc_digits,

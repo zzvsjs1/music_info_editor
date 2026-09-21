@@ -38,12 +38,12 @@ from metadata_polisher.infrastructure.settings import (
 )
 from metadata_polisher.providers.catalogue import provider_label, provider_summary
 from metadata_polisher.providers.network import describe_network_route, validate_network_settings
-from metadata_polisher.rename.template import parse_template
+from metadata_polisher.rename.template import MAXIMUM_PADDING_DIGITS, parse_template
 
 
-def _integer_control(value: int, minimum: int, parent: QWidget) -> QSpinBox:
+def _integer_control(value: int, minimum: int, parent: QWidget, *, maximum: int = 2_147_483_647) -> QSpinBox:
     control = QSpinBox(parent)
-    control.setRange(minimum, 2_147_483_647)
+    control.setRange(minimum, maximum)
     control.setValue(value)
     return control
 
@@ -92,8 +92,12 @@ class SettingsDialog(QDialog):
         self.rename_enabled = QCheckBox("Enable filename renaming", page)
         self.rename_enabled.setChecked(self._original.rename.enabled)
         self.template_edit = QLineEdit(self._original.rename.template, page)
-        self.track_digits_spin = _integer_control(self._original.rename.minimum_track_digits, 1, page)
-        self.disc_digits_spin = _integer_control(self._original.rename.minimum_disc_digits, 1, page)
+        self.track_digits_spin = _integer_control(
+            self._original.rename.minimum_track_digits, 1, page, maximum=MAXIMUM_PADDING_DIGITS,
+        )
+        self.disc_digits_spin = _integer_control(
+            self._original.rename.minimum_disc_digits, 1, page, maximum=MAXIMUM_PADDING_DIGITS,
+        )
         layout.addRow(self.rename_enabled)
         layout.addRow("Filename template", self.template_edit)
         layout.addRow("Minimum track digits", self.track_digits_spin)
@@ -101,7 +105,8 @@ class SettingsDialog(QDialog):
         help_text = QLabel(
             "Use fields such as %tracknumber%, %discnumber% and %title%. "
             "Put optional content in brackets, for example [%discnumber%.]. "
-            "The file extension is retained automatically.",
+            "The file extension is retained automatically. Minimum digit widths are limited to 1–10: "
+            "ten digits cover the largest editable track or disc number without excessive zero padding.",
             page,
         )
         help_text.setWordWrap(True)
@@ -242,6 +247,11 @@ class SettingsDialog(QDialog):
         self.network_mode_combo.currentIndexChanged.connect(self._network_changed)
         self.proxy_host_edit.textChanged.connect(self._route_changed)
         self.proxy_port_spin.valueChanged.connect(self._route_changed)
+        # A connection result describes the exact captured draft. Editing either
+        # credential makes that result stale just as changing its route does.
+        # During a running test all four draft controls are already disabled.
+        self.proxy_username_edit.textChanged.connect(self._route_changed)
+        self.proxy_password_edit.textChanged.connect(self._route_changed)
         self.save_session_login_button.clicked.connect(self.session_login_save_requested)
         self.forget_session_login_button.clicked.connect(self.session_login_forget_requested)
         self.install_credential_snapshot(self._credential_snapshot)

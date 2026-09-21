@@ -362,6 +362,7 @@ class GroupState:
     requires_rescan: bool = False
     revision: int = 0
     manual_track_mapping: TrackMappingResult | None = None
+    search_failure: CandidateLookupResult | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.group, AlbumGroup):
@@ -599,6 +600,22 @@ class GroupState:
             if self.candidate_lookup != self.selection_failure.candidate_lookup:
                 raise ValueError("selection_failure must retain candidate_lookup exactly")
 
+        if self.search_failure is not None:
+            if not isinstance(self.search_failure, CandidateLookupResult):
+                raise TypeError("search_failure must be a CandidateLookupResult or None")
+
+            failed_search = self.search_failure.lookup_result
+
+            if failed_search.group_id != self.group.group_id:
+                raise ValueError("search_failure must refer to this group")
+
+            if (
+                not failed_search.failures
+                or failed_search.candidates
+                or any(summary.successful_queries for summary in failed_search.summaries)
+            ):
+                raise ValueError("search_failure must contain an unsuccessful search")
+
         has_provider_proposals = any(reviewed.proposals for reviewed in reviewed_files)
 
         if has_provider_proposals and self.selected_release is None:
@@ -636,6 +653,7 @@ class GroupState:
                 reviewed_files,
                 self.selected_metadata,
                 self.selection_failure,
+                self.search_failure,
             )
         ):
             raise ValueError("a group requiring rescan cannot retain derived state")
@@ -940,6 +958,7 @@ def mark_groups_requires_rescan(
                 reviewed_files=(),
                 selected_metadata=None,
                 selection_failure=None,
+                search_failure=None,
                 requires_rescan=True,
                 revision=group.revision + 1,
             )
@@ -1095,6 +1114,7 @@ class ScanResultEnvelope:
             or group.reviewed_files
             or group.selected_metadata is not None
             or group.selection_failure is not None
+            or group.search_failure is not None
             or group.requires_rescan
             or group.language_override is not None
             or group.disc_number_override is not None
@@ -1410,6 +1430,7 @@ def _reconcile_apply_filesystem_effects(
             # its candidate/mapping evidence and unaffected reviews separately.
             selected_metadata=None,
             selection_failure=None,
+            search_failure=None,
             reviewed_files=tuple(review for review in group.reviewed_files if review.file_id not in effects),
             revision=group.revision + 1,
         ))
@@ -1569,6 +1590,30 @@ def _group_state_from_lookup_result(
     selected = result.selected_metadata
 
     if selected is None:
+        search = result.candidate_lookup.lookup_result
+
+        if (
+            search.failures
+            and not search.candidates
+            and not any(summary.successful_queries for summary in search.summaries)
+        ):
+            # No completed search supplied replacement evidence. Keep the whole
+            # usable review and its provenance, recording this attempt separately.
+            # A first failed search still remains reachable from the chooser.
+            retained = current.candidate_lookup or result.candidate_lookup
+
+            return replace(
+                current,
+                lookup_result=retained.lookup_result,
+                release_ranking=retained.release_ranking,
+                candidate_lookup=retained,
+                search_failure=result.candidate_lookup,
+                revision=result.base_group_revision,
+            )
+
+        # A completed empty search is a valid replacement outcome, just like a
+        # new candidate list. In both cases the next release is chosen explicitly;
+        # independent local decisions survive the evidence reset below.
         return replace(
             current,
             lookup_result=result.candidate_lookup.lookup_result,
@@ -1580,6 +1625,7 @@ def _group_state_from_lookup_result(
             reviewed_files=local_reviews_after_lookup_reset(state, current, rename_settings),
             selected_metadata=None,
             selection_failure=None,
+            search_failure=None,
             revision=result.base_group_revision,
         )
 
@@ -1591,6 +1637,7 @@ def _group_state_from_lookup_result(
             release_ranking=result.candidate_lookup.release_ranking,
             candidate_lookup=result.candidate_lookup,
             selection_failure=selected,
+            search_failure=None,
             revision=result.base_group_revision,
         )
 
@@ -1622,6 +1669,7 @@ def _group_state_from_lookup_result(
         reviewed_files=reviewed_files,
         selected_metadata=selected,
         selection_failure=None,
+        search_failure=None,
         revision=result.base_group_revision,
     )
 

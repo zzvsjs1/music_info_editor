@@ -66,6 +66,7 @@ class FileApplyResult:
     status: FileApplyStatus
     completed_stage: FileTransactionStage
     issues: tuple[Issue, ...] = ()
+    completed_backup_path: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_path, Path) or not isinstance(self.final_path, Path):
@@ -76,6 +77,9 @@ class FileApplyResult:
 
         if not isinstance(self.completed_stage, FileTransactionStage):
             raise TypeError("completed_stage must be a FileTransactionStage")
+
+        if self.completed_backup_path is not None and not isinstance(self.completed_backup_path, Path):
+            raise TypeError("completed_backup_path must be a Path or None")
 
         copied_issues = tuple(self.issues)
 
@@ -124,6 +128,7 @@ class TransactionalFileWriter:
         operation_id = backup.operation_id
         stage = FileTransactionStage.NOT_STARTED
         temporary_path: Path | None = None
+        completed_backup_path: Path | None = None
         final_path = source.path
         events.emit(FileStarted(operation_id, source.file_id, source.path))
 
@@ -136,11 +141,14 @@ class TransactionalFileWriter:
             if backup.enabled:
                 stage = FileTransactionStage.BACKING_UP
                 self._emit_stage(events, operation_id, source, stage)
-                backup_issue = self._back_up(source.path, backup)
+                backup_result = self._back_up(source.path, backup)
 
-                if backup_issue is not None:
-                    return self._failed(events, operation_id, source, final_path, stage, (backup_issue,))
+                if isinstance(backup_result, Issue):
+                    return self._failed(events, operation_id, source, final_path, stage, (backup_result,))
 
+                # Record completion before observing cancellation. BACKING_UP is
+                # also the last stage when cancellation follows a successful copy.
+                completed_backup_path = backup_result
                 cancellation.raise_if_cancelled()
 
             stage = FileTransactionStage.COPYING_TEMPORARY
@@ -160,7 +168,7 @@ class TransactionalFileWriter:
                     *cleanup_issues,
                 )
 
-                return self._failed(events, operation_id, source, final_path, stage, issues)
+                return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
 
             cancellation.raise_if_cancelled()
 
@@ -175,7 +183,7 @@ class TransactionalFileWriter:
                 except MediaFormatError as error:
                     issues = (error.issue, *self._remove_if_present(temporary_path))
 
-                    return self._failed(events, operation_id, source, final_path, stage, issues)
+                    return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
                 except Exception as error:
                     issues = (
                         _issue_from_error(
@@ -186,7 +194,7 @@ class TransactionalFileWriter:
                         *self._remove_if_present(temporary_path),
                     )
 
-                    return self._failed(events, operation_id, source, final_path, stage, issues)
+                    return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
 
                 cancellation.raise_if_cancelled()
 
@@ -199,7 +207,7 @@ class TransactionalFileWriter:
             if verification:
                 issues = (*verification, *self._remove_if_present(temporary_path))
 
-                return self._failed(events, operation_id, source, final_path, stage, issues)
+                return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
 
             cancellation.raise_if_cancelled()
 
@@ -220,11 +228,11 @@ class TransactionalFileWriter:
                         *self._remove_if_present(temporary_path),
                     )
 
-                    return self._failed(events, operation_id, source, final_path, stage, issues)
+                    return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
 
                 # Cancellation is deliberately not observed after commit begins.
                 # The current file must reach a safe terminal state.
-                return self._succeeded(events, operation_id, source, source.path)
+                return self._succeeded(events, operation_id, source, source.path, completed_backup_path)
 
             destination = changes.rename_change.new_path
             stage = FileTransactionStage.RENAMING
@@ -246,7 +254,7 @@ class TransactionalFileWriter:
                     *self._remove_if_present(temporary_path),
                 )
 
-                return self._failed(events, operation_id, source, source.path, stage, issues)
+                return self._failed(events, operation_id, source, source.path, stage, issues, completed_backup_path)
             except OSError as error:
                 issues = (
                     _issue_from_error(
@@ -257,7 +265,7 @@ class TransactionalFileWriter:
                     *self._remove_if_present(temporary_path),
                 )
 
-                return self._failed(events, operation_id, source, source.path, stage, issues)
+                return self._failed(events, operation_id, source, source.path, stage, issues, completed_backup_path)
 
             stage = FileTransactionStage.VERIFYING_FINAL
             self._emit_stage(events, operation_id, source, stage)
@@ -276,6 +284,7 @@ class TransactionalFileWriter:
                     final_path,
                     stage,
                     (*final_verification, *cleanup_issues),
+                    completed_backup_path,
                 )
 
             stage = FileTransactionStage.CLEANING_ORIGINAL
@@ -299,9 +308,10 @@ class TransactionalFileWriter:
                     destination,
                     stage,
                     (issue,),
+                    completed_backup_path,
                 )
 
-            return self._succeeded(events, operation_id, source, destination)
+            return self._succeeded(events, operation_id, source, destination, completed_backup_path)
         # Every cancellation check above occurs before publication. At those
         # points only the temporary sibling needs removal; the source is intact.
         except OperationCancelledError:
@@ -315,6 +325,7 @@ class TransactionalFileWriter:
                     final_path,
                     stage,
                     cleanup_issues,
+                    completed_backup_path,
                 )
 
             result = FileApplyResult(
@@ -322,6 +333,7 @@ class TransactionalFileWriter:
                 final_path=source.path,
                 status=FileApplyStatus.CANCELLED,
                 completed_stage=stage,
+                completed_backup_path=completed_backup_path,
             )
             events.emit(
                 FileCompleted(
@@ -360,7 +372,7 @@ class TransactionalFileWriter:
         if changes.rename_change is not None and changes.rename_change.old_path != source.path:
             raise ValueError("rename source does not match the source file path")
 
-    def _back_up(self, source_path: Path, policy: BackupPolicy) -> Issue | None:
+    def _back_up(self, source_path: Path, policy: BackupPolicy) -> Path | Issue:
         assert policy.root is not None
 
         try:
@@ -375,7 +387,7 @@ class TransactionalFileWriter:
                 error,
             )
 
-        return None
+        return destination
 
     def _verify(
         self,
@@ -457,6 +469,7 @@ class TransactionalFileWriter:
         operation_id: str,
         source: LocalMediaFile,
         final_path: Path,
+        completed_backup_path: Path | None = None,
     ) -> FileApplyResult:
         self._emit_stage(
             events,
@@ -469,6 +482,7 @@ class TransactionalFileWriter:
             final_path=final_path,
             status=FileApplyStatus.SUCCEEDED,
             completed_stage=FileTransactionStage.COMPLETED,
+            completed_backup_path=completed_backup_path,
         )
         events.emit(
             FileCompleted(
@@ -491,6 +505,7 @@ class TransactionalFileWriter:
         final_path: Path,
         stage: FileTransactionStage,
         issues: tuple[Issue, ...],
+        completed_backup_path: Path | None = None,
     ) -> FileApplyResult:
         result = FileApplyResult(
             source_path=source.path,
@@ -498,6 +513,7 @@ class TransactionalFileWriter:
             status=FileApplyStatus.FAILED,
             completed_stage=stage,
             issues=issues,
+            completed_backup_path=completed_backup_path,
         )
         events.emit(
             FileFailed(

@@ -121,6 +121,44 @@ def test_cancelled_browse_does_not_scan_or_save(qtbot, tmp_path, monkeypatch):
     assert not settings_file.exists()
 
 
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_scan_progress_closes_only_after_success(qtbot, tmp_path, outcome):
+    executor = ControlledExecutor()
+    root = tmp_path / "library"
+    root.mkdir()
+    _, window = create_application([], executor=executor, settings_file=tmp_path / "settings.json")
+    qtbot.addWidget(window)
+    window.root_path_edit.setText(str(root))
+    qtbot.mouseClick(window.rescan_button, Qt.MouseButton.LeftButton)
+    controller = window.operation_controller
+    assert controller is not None
+    dialog = controller.progress_dialog
+    assert dialog is not None
+    assert dialog.isVisible()
+
+    # Completion must be delivered through the queued bridge before the scan
+    # window disappears. Failures and cancellation stay visible for inspection.
+    if outcome == "failed":
+        handle, _, _ = executor.pending.pop()
+
+        with qtbot.waitSignal(window.operation_bridge.failed):
+            handle.future.set_exception(OSError("scan inaccessible"))
+    else:
+        if outcome == "cancelled":
+            assert controller.cancel_active()
+            assert dialog.isVisible()
+
+        terminal = getattr(window.operation_bridge, outcome)
+
+        with qtbot.waitSignal(terminal):
+            executor.run_next()
+
+    assert window.session_state.active_operation is None
+    assert window.rescan_button.isEnabled()
+    assert dialog.stage_label.text() == outcome.capitalize()
+    assert dialog.isVisible() is (outcome != "completed")
+
+
 @pytest.mark.parametrize("corrupt", [False, True])
 def test_scan_failure_or_corrupt_settings_preserves_existing_bytes(qtbot, tmp_path, corrupt):
     executor = ControlledExecutor()

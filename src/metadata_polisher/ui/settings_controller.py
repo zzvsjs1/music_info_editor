@@ -11,6 +11,7 @@ from metadata_polisher.execution.events import OperationEventSink
 from metadata_polisher.infrastructure.settings import ProvidersSettings, save_settings
 from metadata_polisher.providers.base import RequestContext
 from metadata_polisher.providers.catalogue import provider_label
+from metadata_polisher.session.lookup_editing import refresh_inherited_language
 from metadata_polisher.session.review_editing import refresh_rename_previews
 from metadata_polisher.session.state import OperationKind, SessionState
 from metadata_polisher.ui.dialogs.settings_dialog import SettingsDialog
@@ -76,6 +77,14 @@ class SettingsController(QObject):
             # Prepare an immutable preview first, then persist settings before
             # publishing either object. A failed save leaves the live review intact.
             updated = refresh_rename_previews(state, settings.rename) if settings.rename != current.rename else state
+
+            if settings.matching.preferred_language != current.matching.preferred_language:
+                # Prepare inherited review changes before persistence, keeping
+                # both explicit overrides and a failed save fully reversible.
+                updated = refresh_inherited_language(
+                    updated, settings.matching.preferred_language, settings.rename,
+                )
+
             save_settings(self._settings_file, settings)
         except (OSError, ValueError) as error:
             window.workflow_message_label.setText(f"Settings could not be saved: {error}")

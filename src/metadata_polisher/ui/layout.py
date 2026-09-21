@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import QAbstractItemModel, QEvent, QObject, QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtGui import QResizeEvent, QTextOption
 from PySide6.QtWidgets import (
     QDialog,
     QHeaderView,
     QLabel,
     QMenu,
+    QPlainTextEdit,
     QSizePolicy,
     QTableView,
     QTreeView,
@@ -49,14 +50,48 @@ class ElidedLabel(QLabel):
         self.setText(self._full_text)
 
 
-class StatusLabel(QLabel):
-    """Broadcast workflow feedback so both workspaces show the same outcome."""
+class StatusLabel(QPlainTextEdit):
+    """Keep complete workflow feedback in a bounded, selectable message area."""
 
     text_changed = Signal(str)
 
+    def __init__(self, text: str, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setReadOnly(True)
+        # Qt's read-only default permits only mouse selection. Keep keyboard
+        # navigation and Ctrl+A/C available without allowing edits to diagnostics.
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard,
+        )
+        self.setAccessibleName("Workflow messages")
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self._update_height()
+        self.setText(text)
+
+    def _update_height(self) -> None:
+        # Reserve three text lines, including document padding and the frame.
+        # Further lines scroll inside the panel instead of raising the minimum
+        # height of either top-level window. Use font metrics for display scaling.
+        padding = 2 * (int(self.document().documentMargin()) + self.frameWidth())
+        self.setFixedHeight(3 * self.fontMetrics().lineSpacing() + padding)
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._update_height()
+
     def setText(self, text: str) -> None:
-        super().setText(text)
+        # Plain text preserves literal paths and error details. Hiding an empty
+        # message returns the space to the tables; no issue lines are truncated.
+        self.setPlainText(text)
+        self.setVisible(bool(text))
         self.text_changed.emit(text)
+
+    def text(self) -> str:
+        """Retain the existing controller interface for status composition."""
+        return self.toPlainText()
 
     def clear(self) -> None:
         self.setText("")

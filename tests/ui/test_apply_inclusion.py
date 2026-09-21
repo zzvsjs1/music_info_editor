@@ -159,7 +159,7 @@ def test_review_decisions_and_include_rename_do_not_submit_a_write(qtbot, tmp_pa
     window.keep_existing_button.click()
     window.apply_rename_button.click()
 
-    assert window.apply_rename_button.text() == "Include rename"
+    assert window.apply_rename_button.text() == "Use proposed filename"
     assert window.session_state.active_operation is None
     assert not executor.pending
 

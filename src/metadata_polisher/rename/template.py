@@ -5,6 +5,10 @@ from enum import Enum
 
 from metadata_polisher.domain.metadata import MetadataSnapshot
 
+# Ten digits cover every position accepted by the manual metadata editor. This
+# bounds zero-padding allocations only; a larger source number is never cut off.
+MAXIMUM_PADDING_DIGITS = 10
+
 
 class TemplateError(ValueError):
     """A template cannot be parsed or rendered safely."""
@@ -75,8 +79,8 @@ def _validate_minimum_digits(name: str, value: int) -> None:
     if type(value) is not int:
         raise TypeError(f"{name} must be an integer")
 
-    if value < 1:
-        raise ValueError(f"{name} must be at least 1")
+    if not 1 <= value <= MAXIMUM_PADDING_DIGITS:
+        raise ValueError(f"{name} must be between 1 and {MAXIMUM_PADDING_DIGITS}")
 
 
 def _append_literal(nodes: list[TemplateNode], text: str) -> None:

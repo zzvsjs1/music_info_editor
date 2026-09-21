@@ -92,6 +92,40 @@ class ReviewController(QObject):
             for group in self._window.session_state.groups
         )
 
+    def _editable_field_target(
+        self, fields: tuple[MetadataField, ...],
+    ) -> tuple[GroupState, str, MetadataField] | None:
+        """Find a readable member for availability and the manual editor's seed."""
+        state = self._window.session_state
+
+        if state.active_operation is not None or not fields:
+            return None
+
+        indexed = {source.file_id: (group, source) for group in state.groups for source in group.group.files}
+
+        # The first selected file or field may be blocked. Enable the action
+        # when a later member is readable; the batch service remains responsible
+        # for all per-member outcomes and will explain the members it skips.
+        for file_id in self._window.review_target_file_ids():
+            group, source = indexed[file_id]
+
+            if group.requires_rescan:
+                continue
+
+            for field in fields:
+                if source.read_result.field_states[field] in (FieldReadState.PRESENT, FieldReadState.MISSING):
+                    return group, file_id, field
+
+        return None
+
+    def _has_reviewed_scope(self) -> bool:
+        """Safe additions can use proposals from any editable scoped album."""
+        selected = frozenset(self._window.review_target_file_ids())
+        return self._can_review_scope(tuple(selected)) and any(
+            not group.requires_rescan and any(item.file_id in selected for item in group.reviewed_files)
+            for group in self._window.session_state.groups
+        )
+
     @staticmethod
     def _manual_fields_compatible(fields: tuple[MetadataField, ...]) -> bool:
         """A common value needs one input type across all highlighted fields."""
@@ -184,10 +218,8 @@ class ReviewController(QObject):
         group, file_id = self._review_target()
         fields = window.selected_fields()
         field = fields[0] if fields else None
-        source = next((item for item in group.group.files if item.file_id == file_id), None) if group else None
         reviewed = next((item for item in group.reviewed_files if item.file_id == file_id), None) if group else None
         review = next((item for item in reviewed.reviews if item.field is field), None) if reviewed else None
-        editable = self._can_review(group)
         file_ids = window.review_target_file_ids()
         scope_editable = self._can_review_scope(file_ids)
         multiple = len(file_ids) > 1 or len(fields) > 1
@@ -203,10 +235,7 @@ class ReviewController(QObject):
         window.track_mapping_button.setEnabled(
             mapping_group is not None and mapping_group.effective_track_mapping is not None
         )
-        field_editable = (
-            editable and source is not None and field is not None
-            and source.read_result.field_states[field] in (FieldReadState.PRESENT, FieldReadState.MISSING)
-        )
+        field_editable = self._editable_field_target(fields) is not None
 
         for button in (window.keep_existing_button, window.manual_value_button, window.clear_value_button):
             button.setEnabled(field_editable)
@@ -235,7 +264,7 @@ class ReviewController(QObject):
         window.proposal_combo.setEnabled(has_proposal and not multiple)
         window.proposal_combo.setVisible(not multiple)
         window.use_proposed_button.setEnabled(field_editable and bool(file_ids) if multiple else has_proposal)
-        window.accept_safe_additions_button.setEnabled(editable and group is not None and bool(group.reviewed_files))
+        window.accept_safe_additions_button.setEnabled(self._has_reviewed_scope())
         window.keep_filename_button.setEnabled(scope_editable)
         renaming_enabled = window.library_controller is not None and window.library_controller.settings.rename.enabled
         window.apply_rename_button.setEnabled(scope_editable and renaming_enabled)
@@ -289,8 +318,7 @@ class ReviewController(QObject):
         field = fields[0] if fields else None
 
         if (
-            not self._can_review(group) or group is None or file_id is None or field is None
-            or window.library_controller is None
+            field is None or window.library_controller is None or self._editable_field_target(fields) is None
         ):
             return
 
@@ -304,6 +332,9 @@ class ReviewController(QObject):
                 FieldDecisionKind.CLEAR: BatchReviewAction.CLEAR,
             }[decision]
             self._batch(action, fields, value)
+            return
+
+        if not self._can_review(group) or group is None or file_id is None:
             return
 
         try:
@@ -389,17 +420,14 @@ class ReviewController(QObject):
     @Slot()
     def edit_manual(self) -> None:
         window = self._window
-        group, file_id = self._review_target()
         captured_files = window.review_target_file_ids()
         captured_fields = window.selected_fields()
-        field = captured_fields[0] if captured_fields else None
+        target = self._editable_field_target(captured_fields)
 
-        if (
-            not self._can_review(group) or group is None or file_id is None or field is None
-            or not self._manual_fields_compatible(captured_fields)
-        ):
+        if target is None or not self._manual_fields_compatible(captured_fields):
             return
 
+        group, file_id, field = target
         source = next(item for item in group.group.files if item.file_id == file_id)
         reviewed = next((item for item in group.reviewed_files if item.file_id == file_id), None)
         metadata = (
@@ -426,7 +454,6 @@ class ReviewController(QObject):
         if (
             dialog.exec() == QDialog.DialogCode.Accepted
             and window.session_state is snapshot
-            and self._review_target()[1] == file_id
             and window.review_target_file_ids() == captured_files
             and window.selected_fields() == captured_fields
         ):
@@ -435,9 +462,7 @@ class ReviewController(QObject):
     @Slot()
     def accept_safe(self) -> None:
         window = self._window
-        group, _file_id = self._review_target()
-
-        if self._can_review(group) and window.library_controller is not None:
+        if self._has_reviewed_scope() and window.library_controller is not None:
             self._batch(BatchReviewAction.ACCEPT_SAFE_ADDITIONS, tuple(MetadataField))
 
     def _rename(self, decision: RenameDecision) -> None:

@@ -379,6 +379,7 @@ class OperationController(QObject):
             control.setEnabled(False)
 
         self._stage_label.setText("Starting…")
+        self._progress_bar.show()
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%v / %m in this stage")
@@ -408,6 +409,10 @@ class OperationController(QObject):
             if self._dialog_kind is OperationKind.APPLY:
                 # ApplyController presents the one actual results dialogue.
                 self.progress_dialog.close()
+            elif self._dialog_kind is OperationKind.SCAN and status == "Completed":
+                # The main window already presents the scanned library. Keep
+                # unsuccessful scans visible so their terminal status can be read.
+                self.progress_dialog.close()
 
         eligibility = self._control_eligibility
 
@@ -420,9 +425,15 @@ class OperationController(QObject):
 
             self._control_eligibility = None
 
-        self._stage_label.setText("Idle")
+        if self._dialog_kind is OperationKind.SCAN and status == "Completed":
+            count = sum(len(group.group.files) for group in state.groups) + len(state.unsupported_files)
+            self._stage_label.setText(f"Scan complete: {count} {'file' if count == 1 else 'files'}")
+        else:
+            self._stage_label.setText(status)
+
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
+        self._progress_bar.hide()
 
     def _is_current(self, operation_id: str) -> bool:
         active = self._get_state().active_operation

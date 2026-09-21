@@ -16,12 +16,14 @@ class InteractionController(QObject):
         self._shortcuts: list[QShortcut] = []
 
         for key, button in (("Ctrl+O", window.browse_button), ("F5", window.rescan_button),
+                            ("F1", window.help_button),
                             ("Ctrl+E", window.open_review_button), ("Ctrl+L", window.find_selected_button),
                             ("Ctrl+Return", window.apply_selected_button),
                             ("Ctrl+Enter", window.apply_selected_button)):
             self._shortcut(window, key, button)
 
         for key, button in (("Ctrl+Z", window.undo_review_button), ("Ctrl+Return", window.review_apply_button),
+                            ("F1", window.help_button),
                             ("Ctrl+Enter", window.review_apply_button),
                             ("Alt+Left", window.previous_file_button), ("Alt+Right", window.next_file_button)):
             self._shortcut(window.review_window, key, button)

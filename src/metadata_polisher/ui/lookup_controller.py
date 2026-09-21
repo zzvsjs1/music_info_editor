@@ -208,7 +208,10 @@ class LookupController(QObject):
             None,
         )
 
-        if current is None or current.candidate_lookup != result.candidate_lookup:
+        if current is None or (
+            current.candidate_lookup != result.candidate_lookup
+            and current.search_failure != result.candidate_lookup
+        ):
             return
 
         failures = result.candidate_lookup.lookup_result.failures
@@ -235,6 +238,8 @@ class LookupController(QObject):
                 self._next_queued_group()
                 return
 
+            # Keep the usable candidates and mapping visible when a repeat
+            # request fails; its separate receipt supplies the new failure note.
             self._show_candidates(current)
 
         self._window.workflow_message_label.setText(
@@ -263,6 +268,7 @@ class LookupController(QObject):
             lookup, self._window,
             mapped_identity=group.selected_release.identity if group.selected_release is not None else None,
             mapping=group.effective_track_mapping,
+            search_failure=group.search_failure,
         )
         self.candidate_dialog = dialog
 
@@ -491,12 +497,13 @@ class LookupController(QObject):
 
         language = self._window.language_combo.currentData()
 
-        if isinstance(language, str):
+        if language is None or isinstance(language, str):
             self._window.set_session_state(
                 change_language(
                     self._window.session_state,
                     group.group.group_id,
                     language,
                     controller.settings.rename,
+                    settings_language=controller.settings.matching.preferred_language,
                 )
             )

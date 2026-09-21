@@ -147,17 +147,58 @@ def _read_position(
     number_keys: Sequence[str],
     total_keys: Sequence[str],
 ) -> tuple[Position, FieldReadState, str | None]:
-    number, number_state, number_detail = _read_position_component(tags, number_keys)
+    # Number tags may contain either "1" or "1/2". Collect the two components
+    # independently so an omitted side stays unknown, while every supplied
+    # number and total must agree across repeats and separate total aliases.
+    numbers: set[int] = set()
+    totals: set[int] = set()
+
+    for key in number_keys:
+        values, state, detail = _read_text_values(tags, (key,))
+
+        if state is FieldReadState.UNREADABLE:
+            return Position(), state, detail
+
+        for value in values:
+            number_text, separator, total_text = value.partition("/")
+
+            try:
+                number = int(number_text) if number_text else None
+                inline_total = int(total_text) if separator and total_text else None
+
+                if number is None and inline_total is None:
+                    raise ValueError("Position contained neither a number nor a total")
+
+                # Validate each representation before combining it with others;
+                # negatives and malformed totals must never become missing data.
+                position = Position(number=number, total=inline_total)
+            except ValueError as error:
+                return Position(), FieldReadState.UNREADABLE, f"Invalid {key} position: {error}"
+
+            if position.number is not None:
+                numbers.add(position.number)
+
+            if position.total is not None:
+                totals.add(position.total)
+
+    # Separate total tags remain numeric-only. An inline total does not take
+    # precedence over contradictory DISCTOTAL/TOTALDISCS (or track aliases).
     total, total_state, total_detail = _read_position_component(tags, total_keys)
 
-    if FieldReadState.UNREADABLE in (number_state, total_state):
-        return Position(), FieldReadState.UNREADABLE, number_detail or total_detail
+    if total_state is FieldReadState.UNREADABLE:
+        return Position(), total_state, total_detail
 
-    if number_state is FieldReadState.MISSING and total_state is FieldReadState.MISSING:
+    if total is not None:
+        totals.add(total)
+
+    if len(numbers) > 1 or len(totals) > 1:
+        return Position(), FieldReadState.UNREADABLE, f"Conflicting values for {'/'.join((*number_keys, *total_keys))}"
+
+    if not numbers and not totals:
         return Position(), FieldReadState.MISSING, None
 
     try:
-        position = Position(number=number, total=total)
+        position = Position(number=next(iter(numbers), None), total=next(iter(totals), None))
     except (TypeError, ValueError) as error:
         return Position(), FieldReadState.UNREADABLE, str(error)
 

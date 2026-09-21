@@ -1,12 +1,15 @@
 """Small native dialogs for explicit in-memory grouping choices."""
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QListWidget, QSpinBox, QVBoxLayout, QWidget
 
 from metadata_polisher.scanner.grouping import AlbumGroup
 
 
 class MergeGroupsDialog(QDialog):
-    def __init__(self, groups: tuple[AlbumGroup, ...], parent: QWidget | None = None) -> None:
+    def __init__(
+        self, groups: tuple[AlbumGroup, ...], parent: QWidget | None = None, *, review_warning: str = "",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Merge groups")
         layout = QVBoxLayout(self)
@@ -19,7 +22,20 @@ class MergeGroupsDialog(QDialog):
             listing.addItem(f"{group.album_title or group.files[0].path.parent.name} — {len(group.files)} files")
 
         layout.addWidget(listing)
+
+        if review_warning:
+            warning = QLabel(review_warning, self)
+            warning.setTextFormat(Qt.TextFormat.PlainText)
+            warning.setWordWrap(True)
+            layout.addWidget(warning)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+
+        if review_warning:
+            # A loss of candidate-dependent work needs a deliberate acceptance;
+            # Enter and Escape should preserve the existing reviewed session.
+            buttons.button(QDialogButtonBox.StandardButton.Cancel).setDefault(True)
+
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)

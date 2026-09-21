@@ -15,7 +15,7 @@ from metadata_polisher.application.apply import (
 from metadata_polisher.application.apply_summary import build_apply_summary
 from metadata_polisher.domain.errors import MediaErrorCode
 from metadata_polisher.execution.cancellation import CancellationToken
-from metadata_polisher.execution.events import FileSkipReason, FileTransactionStage, OperationEventSink
+from metadata_polisher.execution.events import FileSkipReason, OperationEventSink
 from metadata_polisher.infrastructure.logging_setup import redact_sensitive_text
 from metadata_polisher.infrastructure.reporting import ReportWriteStatus
 from metadata_polisher.session.apply_preparation import prepare_apply_request, reviewed_file_ids
@@ -515,9 +515,7 @@ class ApplyController(QObject):
 
         if request is not None and request.backup.enabled:
             backed_up = sum(
-                outcome.transaction_result is not None and outcome.transaction_result.completed_stage not in (
-                    FileTransactionStage.NOT_STARTED, FileTransactionStage.BACKING_UP,
-                )
+                outcome.transaction_result is not None and outcome.transaction_result.completed_backup_path is not None
                 for outcome in files
             )
             backups = f"{backed_up} completed before file processing"

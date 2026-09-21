@@ -105,6 +105,117 @@ def test_flac_surfaces_conflicting_total_keys_instead_of_preferring_an_alias(tmp
     assert result.field_states[MetadataField.DISC] is FieldReadState.UNREADABLE
 
 
+@pytest.mark.parametrize(
+    ("field", "number_key", "total_keys"),
+    [
+        (MetadataField.TRACK, "TRACKNUMBER", ("TRACKTOTAL", "TOTALTRACKS")),
+        (MetadataField.DISC, "DISCNUMBER", ("DISCTOTAL", "TOTALDISCS")),
+    ],
+)
+@pytest.mark.parametrize(
+    ("values", "separate_total", "expected"),
+    [
+        (["1/1"], None, Position(1, 1)),
+        (["03/049"], None, Position(3, 49)),
+        ([" 03 / 049 "], "49", Position(3, 49)),
+        (["3", "03/049", "3/49"], "049", Position(3, 49)),
+        (["/49"], None, Position(None, 49)),
+        (["3/"], None, Position(3)),
+        (["3/", "/49"], "49", Position(3, 49)),
+    ],
+)
+def test_flac_reads_combined_positions_and_agreeing_totals(
+    tmp_path, field, number_key, total_keys, values, separate_total, expected,
+) -> None:
+    # Some libraries store the total inside the number tag. Repeated values
+    # and separate aliases must agree numerically, including leading zeroes.
+    tags = {number_key: values}
+
+    if separate_total is not None:
+        tags.update({key: [separate_total] for key in total_keys})
+
+    audio = FakeFlacFile(tags)
+    result = FlacAdapter(loader=lambda _: audio).read(tmp_path / "track.flac")
+
+    assert getattr(result.metadata, field.value) == expected
+    assert result.field_states[field] is FieldReadState.PRESENT
+    assert result.issues == ()
+    assert audio.save_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "number_key", "total_key"),
+    [
+        (MetadataField.TRACK, "TRACKNUMBER", "TRACKTOTAL"),
+        (MetadataField.TRACK, "TRACKNUMBER", "TOTALTRACKS"),
+        (MetadataField.DISC, "DISCNUMBER", "DISCTOTAL"),
+        (MetadataField.DISC, "DISCNUMBER", "TOTALDISCS"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("values", "separate_total"),
+    [(["1/2"], "3"), (["1/2", "1/3"], "2"), (["1/2", "2/2"], "2")],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_flac_combined_position_conflicts_remain_unreadable(
+    tmp_path, field, number_key, total_key, values, separate_total, reverse,
+) -> None:
+    items = [(number_key, list(reversed(values)) if reverse else values), (total_key, [separate_total])]
+    tags = dict(reversed(items) if reverse else items)
+    result = FlacAdapter(loader=lambda _: FakeFlacFile(tags)).read(tmp_path / "track.flac")
+
+    assert getattr(result.metadata, field.value) == Position()
+    assert result.field_states[field] is FieldReadState.UNREADABLE
+    assert len(result.issues) == 1
+    assert result.issues[0].code is MediaErrorCode.TAG_READ_FAILED
+    assert "conflict" in result.issues[0].technical_detail.casefold()
+
+
+@pytest.mark.parametrize(
+    "value", ["/", "1/2/3", "one/2", "1/two", "-1/2", "1/-2"],
+)
+def test_flac_malformed_combined_position_remains_unreadable(tmp_path, value) -> None:
+    result = FlacAdapter(loader=lambda _: FakeFlacFile({"DISCNUMBER": [value]})).read(tmp_path / "track.flac")
+
+    assert result.metadata.disc == Position()
+    assert result.field_states[MetadataField.DISC] is FieldReadState.UNREADABLE
+    assert len(result.issues) == 1
+
+
+def test_flac_separate_total_does_not_accept_combined_position(tmp_path) -> None:
+    audio = FakeFlacFile({"DISCNUMBER": ["1/2"], "DISCTOTAL": ["2/2"]})
+    result = FlacAdapter(loader=lambda _: audio).read(tmp_path / "track.flac")
+
+    assert result.field_states[MetadataField.DISC] is FieldReadState.UNREADABLE
+
+
+def test_flac_combined_position_is_preserved_until_explicitly_changed(tmp_path) -> None:
+    # Use Mutagen's own case-insensitive dictionary, which iterates pairs.
+    # Reading or editing a title must not normalise unrelated position tags.
+    tags = VCFLACDict()
+    tags["DISCNUMBER"] = ["1/1"]
+    tags["TOTALDISCS"] = ["1"]
+    audio = FakeFlacFile(tags)  # type: ignore[arg-type]
+    adapter = FlacAdapter(loader=lambda _: audio)
+    path = tmp_path / "track.flac"
+    original = adapter.read(path)
+
+    assert original.metadata.disc == Position(1, 1)
+    assert tags["DISCNUMBER"] == ["1/1"]
+
+    adapter.write_changes(path, (MetadataChange(MetadataField.TITLE, None, "New title"),))
+
+    assert tags["DISCNUMBER"] == ["1/1"]
+    assert tags["TOTALDISCS"] == ["1"]
+
+    adapter.write_changes(path, (MetadataChange(MetadataField.DISC, original.metadata.disc, Position(2, 3)),))
+
+    assert tags["DISCNUMBER"] == ["2"]
+    assert tags["DISCTOTAL"] == ["3"]
+    assert "TOTALDISCS" not in tags
+    assert adapter.read(path).metadata.disc == Position(2, 3)
+
+
 # A native Vorbis dictionary iterates pairs, unlike dict; this case catches
 # adapters that accidentally assume all tag mappings iterate keys.
 def test_flac_supports_real_vorbis_mapping_pair_iteration(tmp_path: Path) -> None:

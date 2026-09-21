@@ -14,10 +14,43 @@ from PySide6.QtWidgets import (
 )
 
 from metadata_polisher.application.lookup import CandidateLookupResult, ReleaseMediumIdentity
+from metadata_polisher.domain.errors import ProviderErrorCode
 from metadata_polisher.matching.release_scoring import RankedReleaseMedium
 from metadata_polisher.matching.track_mapping import TrackMappingResult
 from metadata_polisher.ui.dialogs.match_explanation_dialog import MatchExplanationDialog
-from metadata_polisher.ui.layout import configure_columns, fit_initial_size
+from metadata_polisher.ui.layout import StatusLabel, configure_columns, fit_initial_size
+
+
+def _provider_recovery_text(code: ProviderErrorCode) -> str:
+    """Choose a useful next action from the failure category, without guessing titles."""
+    if code is ProviderErrorCode.ACCESS_DENIED:
+        return (
+            "The provider blocked access. Retry later, or choose another provider explicitly in Settings. "
+            "Changing the album title will not resolve an access block."
+        )
+
+    if code is ProviderErrorCode.PROXY_AUTHENTICATION_REQUIRED:
+        return "Check the session proxy username and password in Settings, then test the corrected credentials."
+
+    if code is ProviderErrorCode.PROXY_CONNECTION_FAILED:
+        return "Check the proxy host, port and running proxy service in Settings, then test the connection."
+
+    if code is ProviderErrorCode.TLS_VERIFICATION_FAILED:
+        return (
+            "Check the system clock and the connection's certificate trust, then retry; "
+            "certificate checks stay enabled."
+        )
+
+    if code is ProviderErrorCode.AUTHENTICATION_REQUIRED:
+        return "Check the selected provider's access requirements in Settings, then test the connection."
+
+    if code is ProviderErrorCode.RATE_LIMITED:
+        return "Wait before retrying this provider; its request limit was reached."
+
+    return (
+        "Retry Find Metadata. If requests still fail, check the connection "
+        "and test the selected provider in Settings."
+    )
 
 
 def _lookup_issue_text(result: CandidateLookupResult) -> str:
@@ -42,6 +75,15 @@ def _lookup_issue_text(result: CandidateLookupResult) -> str:
         for failure in result.lookup_result.failures
     ))
 
+    # Successful empty queries and failed requests can coexist. Explain each
+    # failure's recovery independently; alternative titles are useful only when
+    # at least one query actually completed successfully below.
+    messages.extend(dict.fromkeys(
+        f"{failure.engine_id}: {_provider_recovery_text(failure.issue.code)}"
+        for failure in result.lookup_result.failures
+        if isinstance(failure.issue.code, ProviderErrorCode)
+    ))
+
     for notice in result.hydration_notices:
         identity = " / ".join(notice.candidate_identity)
         message = (
@@ -53,7 +95,9 @@ def _lookup_issue_text(result: CandidateLookupResult) -> str:
 
     messages.extend(f"{issue.code.value} — {issue.message}" for issue in result.matching_issues)
 
-    if not result.lookup_result.candidates:
+    if not result.lookup_result.candidates and any(
+        summary.successful_queries > 0 for summary in result.lookup_result.summaries
+    ):
         messages.append("Close this window and use Edit search terms to try another album title or artist.")
 
     return "\n".join(messages)
@@ -67,6 +111,7 @@ class CandidateDialog(QDialog):
     def __init__(
         self, candidate_lookup: CandidateLookupResult, parent: QWidget | None = None,
         *, mapped_identity: ReleaseMediumIdentity | None = None, mapping: TrackMappingResult | None = None,
+        search_failure: CandidateLookupResult | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Choose metadata release")
@@ -81,6 +126,8 @@ class CandidateDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         model = QStandardItemModel(0, 8, self.table)
+        sort_role = Qt.ItemDataRole.UserRole + 1
+        model.setSortRole(sort_role)
         model.setHorizontalHeaderLabels(
             (
                 "Engine",
@@ -119,9 +166,12 @@ class CandidateDialog(QDialog):
             )
             cells = [QStandardItem(value) for value in values]
 
-            for cell in cells:
+            for column, cell in enumerate(cells):
                 cell.setEditable(False)
                 cell.setData(entry, Qt.ItemDataRole.UserRole)
+                # Keep identity separate from ordering. Only score has numeric
+                # semantics; all other columns retain their visible text order.
+                cell.setData(entry.result.score if column == 6 else cell.text(), sort_role)
                 cell.setToolTip(cell.text())
 
             # CandidateLookupResult contains release scores, not the selected
@@ -136,9 +186,21 @@ class CandidateDialog(QDialog):
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
         layout.addWidget(self.table)
-        self.issues_label = QLabel(_lookup_issue_text(candidate_lookup), self)
-        self.issues_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.issues_label.setWordWrap(True)
+        issue_text = _lookup_issue_text(candidate_lookup)
+
+        if search_failure is not None and search_failure != candidate_lookup:
+            # The latest request can fail while earlier candidates remain usable.
+            # Keep both receipts visible without mixing their matching evidence.
+            issue_text = "\n".join(filter(None, (
+                "The latest search failed. Previous results and review decisions are retained.",
+                _lookup_issue_text(search_failure),
+                issue_text,
+            )))
+
+        # Keep complete, copyable notices inside their own scroll area. The
+        # table and action row retain space even for hundreds of result details.
+        self.issues_label = StatusLabel(issue_text, self)
+        self.issues_label.setAccessibleName("Candidate search messages and details")
         self.issues_label.setObjectName("candidateIssuesLabel")
         layout.addWidget(self.issues_label)
         actions = QHBoxLayout()
