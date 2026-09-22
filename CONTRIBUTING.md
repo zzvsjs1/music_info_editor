@@ -20,6 +20,8 @@ If the checkout already has a working `.venv`, reuse it and skip the creation co
 
 Read the existing implementation and relevant tests before editing. Keep application rules in typed services and immutable state transformations; Qt widgets should present state and dispatch user actions. Keep matching decisions explainable, preserve field provenance, and require a validated `ChangeSet` before writing.
 
+The file workspace lives in `src/metadata_polisher/ui/files_pane.py`, and metadata review controls live in `src/metadata_polisher/ui/review_pane.py`. Each pane owns its controls, layout and column defaults over a supplied model. `MainWindow` composes the panes and resolves session selections; `MetadataReviewWindow` manages the separate review window. Existing main-window control attributes are aliases to the pane widgets so controllers keep using the same objects. Put layout changes in the relevant pane, retain widget names used by saved preferences, and keep review decisions and write inclusion in the existing controllers and session services.
+
 For a behaviour change, first add a focused test that demonstrates the bug or missing behaviour. Confirm that it fails for the expected reason, implement the change, then run the relevant checks. Use clear English comments for non-obvious logic and UK English in new documentation and user-facing text. Separate logical blocks with a blank line where it improves readability.
 
 Changes to tag mappings need an authoritative format reference and a test of the raw representation. Reading an edit back through the same library alone does not establish format correctness. Preserve unmanaged tags and supported existing tag versions; report a limitation if an edit cannot be represented safely.

@@ -12,11 +12,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
-    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSplitter,
-    QTableView,
     QToolButton,
     QTreeView,
     QVBoxLayout,
@@ -35,7 +33,8 @@ from metadata_polisher.session.lookup_editing import (
 from metadata_polisher.session.state import GroupSelection, GroupState, SessionState, UnsupportedSelection
 from metadata_polisher.ui.dialogs.metadata_review_window import MetadataReviewWindow
 from metadata_polisher.ui.dialogs.workflow_help_dialog import WorkflowHelpDialog
-from metadata_polisher.ui.layout import ElidedLabel, StatusLabel
+from metadata_polisher.ui.files_pane import FilesPane
+from metadata_polisher.ui.layout import StatusLabel
 from metadata_polisher.ui.models import FileTableModel, GroupListModel, MetadataDiffModel
 from metadata_polisher.ui.models.group_model import (
     GroupPresentationStatus,
@@ -44,6 +43,7 @@ from metadata_polisher.ui.models.group_model import (
 from metadata_polisher.ui.operation_controller import OperationController
 from metadata_polisher.ui.pending_work import confirm_discard_pending
 from metadata_polisher.ui.qt_bridge import QtOperationBridge
+from metadata_polisher.ui.review_pane import APPLY_SAFETY_TEXT, ReviewPane
 
 if TYPE_CHECKING:
     from metadata_polisher.ui.apply_controller import ApplyController
@@ -179,43 +179,62 @@ class MainWindow(QMainWindow):
         self.operation_controller = controller
 
     def _build_widgets(self) -> None:
+        self.files_pane = FilesPane(self.file_model, self)
+        self.review_pane = ReviewPane(self.diff_model, self)
+        # Keep the existing controller interface during this extraction. These
+        # are aliases to the displayed controls, not duplicate widgets or state.
+        self.file_table_view = self.files_pane.file_table_view
+        self.include_selected_button = self.files_pane.include_selected_button
+        self.exclude_selected_button = self.files_pane.exclude_selected_button
+        self.select_all_files_button = self.files_pane.select_all_files_button
+        self.clear_file_selection_button = self.files_pane.clear_file_selection_button
+        self.open_review_button = self.files_pane.open_review_button
+        self.rename_files_button = self.files_pane.rename_files_button
+        self.selection_scope_label = self.files_pane.selection_scope_label
+        self.file_guidance_label = self.files_pane.file_guidance_label
+
+        self.diff_table_view = self.review_pane.diff_table_view
+        self.previous_file_button = self.review_pane.previous_file_button
+        self.next_file_button = self.review_pane.next_file_button
+        self.include_review_scope_button = self.review_pane.include_review_scope_button
+        self.review_apply_button = self.review_pane.review_apply_button
+        self.review_inclusion_label = self.review_pane.review_inclusion_label
+        self.review_apply_guidance_label = self.review_pane.review_apply_guidance_label
+        self.review_message_label = self.review_pane.review_message_label
+        self.field_guidance_label = self.review_pane.field_guidance_label
+        self.field_details_button = self.review_pane.field_details_button
+        self.field_details = self.review_pane.field_details
+        self.proposal_combo = self.review_pane.proposal_combo
+        self.keep_existing_button = self.review_pane.keep_existing_button
+        self.use_proposed_button = self.review_pane.use_proposed_button
+        self.manual_value_button = self.review_pane.manual_value_button
+        self.clear_value_button = self.review_pane.clear_value_button
+        self.accept_safe_additions_button = self.review_pane.accept_safe_additions_button
+        self.keep_filename_button = self.review_pane.keep_filename_button
+        self.apply_rename_button = self.review_pane.apply_rename_button
+        self.rename_previews_button = self.review_pane.rename_previews_button
+        self.undo_review_button = self.review_pane.undo_review_button
+        self.review_scope_combo = self.review_pane.review_scope_combo
+        self.review_scope_label = self.review_pane.review_scope_label
+        self.rename_validation_label = self.review_pane.rename_validation_label
+        self.rename_current_label = self.review_pane.rename_current_label
+        self.rename_proposed_label = self.review_pane.rename_proposed_label
+        self.rename_template_label = self.review_pane.rename_template_label
+
+        self.field_details_button.toggled.connect(self._refresh_field_details)
+        self.review_context_changed.connect(self._refresh_field_details)
         self.root_path_edit = QLineEdit(self)
         self.root_path_edit.setObjectName("rootPathEdit")
         self.root_path_edit.setPlaceholderText("Choose a music library folder")
-
         self.browse_button = self._button("Browse", "browseButton")
         self.rescan_button = self._button("Rescan", "rescanButton")
-        self.find_selected_button = self._button(
-            "Find Metadata for Selected",
-            "findSelectedButton",
-        )
-        self.find_all_incomplete_button = self._button(
-            "Find All Incomplete",
-            "findAllIncompleteButton",
-        )
+        self.find_selected_button = self._button("Find Metadata for Selected", "findSelectedButton")
+        self.find_all_incomplete_button = self._button("Find All Incomplete", "findAllIncompleteButton")
         self.apply_selected_button = self._button("Review changes…", "applySelectedButton")
         self.apply_all_button = self._button("Apply All", "applyAllButton")
         self.apply_results_button = self._button("Apply results…", "applyResultsButton")
-        self.include_selected_button = self._button("Add to write batch", "includeSelectedButton")
-        self.exclude_selected_button = self._button("Remove from batch", "excludeSelectedButton")
-        self.select_all_files_button = self._button("Select all", "selectAllFilesButton")
-        self.select_all_files_button.setToolTip("Select all files in the displayed group (Ctrl+A)")
-        self.clear_file_selection_button = self._button("Clear selection", "clearFileSelectionButton")
-        self.clear_file_selection_button.setToolTip("Clear highlighted files (Ctrl+Shift+A)")
-        self.open_review_button = self._button("Metadata review…", "openReviewButton")
-        self.rename_files_button = self._button("Rename files…", "renameFilesButton")
-        self.previous_file_button = self._button("Previous", "previousReviewFileButton")
-        self.next_file_button = self._button("Next", "nextReviewFileButton")
-        self.include_review_scope_button = self._button("Add scope to write batch", "includeReviewScopeButton")
-        self.review_apply_button = self._button("Review changes…", "reviewApplyButton")
-        self.review_inclusion_label = QLabel("0 included for writing", self)
         self.apply_guidance_label = QLabel(self)
         self.apply_guidance_label.setWordWrap(True)
-        self.review_apply_guidance_label = QLabel(self)
-        self.review_apply_guidance_label.setWordWrap(True)
-        self.review_message_label = StatusLabel("", self)
-        self.selection_scope_label = QLabel("0 highlighted · 0 included", self)
-        self.selection_scope_label.setWordWrap(True)
         self.active_provider_label = QLabel("Lookup provider: MusicBrainz Direct", self)
         self.active_provider_label.setWordWrap(True)
         self.cancel_button = self._button("Cancel operation", "cancelButton")
@@ -225,23 +244,6 @@ class MainWindow(QMainWindow):
         self.help_button.setToolTip("Workflow, review scope and keyboard shortcuts (F1)")
         self.help_button.clicked.connect(self.open_workflow_help)
         self.help_button.hide()
-        self.file_guidance_label = QLabel("Choose a folder to scan your music library.", self)
-        self.file_guidance_label.setWordWrap(True)
-        self.field_guidance_label = QLabel("Select a field, or double-click its Final value to edit.", self)
-        self.field_guidance_label.setWordWrap(True)
-        self.field_details_button = self._button("Full values ▸", "fieldDetailsButton")
-        self.field_details_button.setCheckable(True)
-        self.field_details_button.setToolTip("Read and copy full values without editing metadata")
-        self.field_details = QPlainTextEdit(self)
-        self.field_details.setReadOnly(True)
-        self.field_details.setAccessibleName("Full metadata values and review details")
-        self.field_details.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard,
-        )
-        self.field_details.setMaximumHeight(6 * self.field_details.fontMetrics().lineSpacing() + 12)
-        self.field_details.hide()
-        self.field_details_button.toggled.connect(self._refresh_field_details)
-        self.review_context_changed.connect(self._refresh_field_details)
         self.split_group_button = self._button("Split selected files", "splitGroupButton")
         self.merge_groups_button = self._button("Merge groups", "mergeGroupsButton")
         self.disc_override_button = self._button("Disc number…", "discOverrideButton")
@@ -251,58 +253,15 @@ class MainWindow(QMainWindow):
         self.language_combo = QComboBox(self)
         self.language_combo.setObjectName("languageCombo")
         self.language_combo.addItem("Auto", "auto")
-        self.proposal_combo = QComboBox(self)
-        self.proposal_combo.setObjectName("proposalCombo")
-        self.keep_existing_button = self._button("Keep Existing", "keepExistingButton")
-        self.use_proposed_button = self._button("Use Proposed", "useProposedButton")
-        self.manual_value_button = self._button("Manual…", "manualValueButton")
-        self.clear_value_button = self._button("Clear", "clearValueButton")
-        self.accept_safe_additions_button = self._button("Accept Safe Additions", "acceptSafeAdditionsButton")
-        self.keep_filename_button = self._button("Keep filename", "keepFilenameButton")
-        self.apply_rename_button = self._button("Use proposed filename", "applyRenameButton")
-        self.rename_previews_button = self._button("Filename previews…", "renamePreviewsButton")
-        self.undo_review_button = self._button("Undo review", "undoReviewButton")
-        self.review_scope_combo = QComboBox(self)
-        self.review_scope_combo.addItem("Selected files", "selected")
-        self.review_scope_combo.addItem("Current group", "group")
-        self.review_scope_combo.addItem("Included files", "included")
-        self.review_scope_combo.addItem("All library files", "library")
-        self.review_scope_label = QLabel("Select files and fields to review.", self)
-        self.review_scope_label.setWordWrap(True)
-        self.rename_validation_label = QLabel("", self)
-        self.rename_validation_label.setWordWrap(True)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.main_splitter.setObjectName("mainSplitter")
-
         self.group_view = QTreeView(self.main_splitter)
         self.group_view.setObjectName("groupView")
         self.group_view.setModel(self.group_model)
         self.group_view.setRootIsDecorated(False)
         self.group_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.group_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        self.file_table_view = QTableView(self.main_splitter)
-        self.file_table_view.setObjectName("fileTableView")
-        self.file_table_view.setModel(self.file_model)
-        self.file_table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.file_table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        self.diff_table_view = QTableView(self)
-        self.diff_table_view.setObjectName("diffTableView")
-        self.diff_table_view.setModel(self.diff_model)
-        self.diff_table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.diff_table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        self.rename_current_label = ElidedLabel("Current filename: —", self)
-        self.rename_current_label.setObjectName("renameCurrentLabel")
-        self.rename_proposed_label = ElidedLabel("Proposed filename: —", self)
-        self.rename_proposed_label.setObjectName("renameProposedLabel")
-        self.rename_template_label = ElidedLabel(
-            "Template: [%discnumber%.]%tracknumber%. %title%",
-            self,
-        )
-        self.rename_template_label.setObjectName("renameTemplateLabel")
 
         self.summary_counts_label = QLabel("0 ready · 0 review · 0 unsupported", self)
         self.summary_counts_label.setObjectName("summaryCountsLabel")
@@ -313,10 +272,7 @@ class MainWindow(QMainWindow):
         self.operation_progress_bar.setRange(0, 100)
         self.operation_progress_bar.setValue(0)
         self.operation_progress_bar.hide()
-        self.apply_safety_label = QLabel(
-            "Review decisions stay in memory. Only Apply changes in the final confirmation writes files.",
-            self,
-        )
+        self.apply_safety_label = QLabel(APPLY_SAFETY_TEXT, self)
         self.apply_safety_label.setObjectName("applySafetyLabel")
         self.apply_safety_label.setWordWrap(True)
         self.workflow_message_label = StatusLabel("", self)
@@ -371,44 +327,12 @@ class MainWindow(QMainWindow):
         actions.insertWidget(4, self.language_combo)
 
         group_pane = self._pane("Albums / groups", self.group_view)
-        file_pane = self._pane("Files / tracks", self.file_table_view)
-        selection = QHBoxLayout()
-        selection.addWidget(self.select_all_files_button)
-        selection.addWidget(self.clear_file_selection_button)
-        selection.addStretch(1)
-        selection.addWidget(self.rename_files_button)
-        selection.addWidget(self.open_review_button)
-        inclusion = QHBoxLayout()
-        inclusion.addWidget(self.selection_scope_label, 1)
-        inclusion.addWidget(self.include_selected_button)
-        inclusion.addWidget(self.exclude_selected_button)
-        file_layout = file_pane.layout()
-        assert isinstance(file_layout, QVBoxLayout)
-        file_layout.insertLayout(1, selection)
-        file_layout.insertWidget(2, self.file_guidance_label)
-        file_layout.addLayout(inclusion)
-
-        review_footer = QWidget(self)
-        review_footer_layout = QVBoxLayout(review_footer)
-        review_footer_layout.setContentsMargins(0, 0, 0, 0)
-        review_footer_layout.addWidget(QLabel("Write batch", review_footer))
-        review_safety = QLabel(self.apply_safety_label.text(), review_footer)
-        review_safety.setWordWrap(True)
-        review_footer_layout.addWidget(review_safety)
-        review_footer_layout.addWidget(self.review_message_label)
-        review_footer_layout.addWidget(self.review_apply_guidance_label)
-        review_actions = QHBoxLayout()
-        review_actions.addWidget(self.review_inclusion_label, 1)
-        review_actions.addWidget(self.include_review_scope_button)
-        review_actions.addWidget(self.review_apply_button)
-        review_footer_layout.addLayout(review_actions)
-        self.review_window = MetadataReviewWindow(self._diff_pane(), self.review_scope_combo, review_footer, self)
-        self.review_scope_combo.setAccessibleName("Review scope")
+        self.review_window = MetadataReviewWindow(self.review_pane, self)
         self.root_path_edit.setAccessibleName("Music folder")
         self.language_combo.setAccessibleName("Metadata language preference")
 
         self.main_splitter.insertWidget(0, group_pane)
-        self.main_splitter.addWidget(file_pane)
+        self.main_splitter.addWidget(self.files_pane)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
         self.main_splitter.setChildrenCollapsible(False)
@@ -448,31 +372,8 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _refresh_field_details(self) -> None:
-        """Expose complete projected values without creating an edit dialogue."""
-        fields = self.selected_fields()
-        self.field_details_button.setEnabled(bool(fields))
-        self.field_guidance_label.setVisible(not fields)
-        parts: list[str] = []
-
-        for row in range(self.diff_model.rowCount()):
-            if self.diff_model.index(row, 0).data(Qt.ItemDataRole.UserRole) not in fields:
-                continue
-
-            lines = [f"{self.diff_model.headerData(column, Qt.Orientation.Horizontal)}: "
-                     f"{self.diff_model.index(row, column).data()}"
-                     for column in range(self.diff_model.columnCount())]
-            lines.append(str(self.diff_model.index(row, 0).data(Qt.ItemDataRole.ToolTipRole) or ""))
-            parts.append("\n".join(lines))
-
-        text = "\n\n".join(parts)
-
-        # Preserve a user's copy selection during unrelated repaint signals.
-        if text != self.field_details.toPlainText():
-            self.field_details.setPlainText(text)
-
-        expanded = self.field_details_button.isChecked()
-        self.field_details_button.setText("Full values ▾" if expanded else "Full values ▸")
-        self.field_details.setVisible(expanded and bool(text))
+        """Pass the resolved field identities to the pane's read-only renderer."""
+        self.review_pane.refresh_field_details(self.selected_fields())
 
     def reset_layout(self) -> None:
         """Apply readable initial proportions only on startup or explicit reset."""
@@ -488,27 +389,8 @@ class MainWindow(QMainWindow):
         available = self.review_window.screen().availableGeometry()
         self.review_window.resize(min(1080, available.width() - 32), min(760, available.height() - 64))
         configure_columns(self.group_view, (190, 100, 60, 80))
-        configure_columns(self.file_table_view, (56, 100, 260, 65, 65, 240, 160, 160, 70, 65, 90, 100))
-
-        for column in (6, 7, 10, 11):
-            self.file_table_view.setColumnHidden(column, True)
-
-        configure_columns(self.diff_table_view, (100, 108, 180, 180, 180, 180))
-        self.diff_table_view.setColumnHidden(5, True)
-        # Give the final visible value spare room while retaining independently
-        # resized Field/Existing/Proposed columns across projection refreshes.
-        self.diff_table_view.horizontalHeader().setStretchLastSection(True)
-        # Reserve eight track rows, their header and the horizontal scrollbar.
-        self.file_table_view.setMinimumHeight(
-            8 * self.file_table_view.verticalHeader().defaultSectionSize()
-            + self.file_table_view.horizontalHeader().height()
-            + self.file_table_view.horizontalScrollBar().sizeHint().height()
-            + 2 * self.file_table_view.frameWidth(),
-        )
-        self.diff_table_view.setMinimumHeight(
-            5 * self.diff_table_view.verticalHeader().defaultSectionSize()
-            + self.diff_table_view.horizontalHeader().height() + 2 * self.diff_table_view.frameWidth(),
-        )
+        self.files_pane.reset_layout()
+        self.review_pane.reset_layout()
 
     def open_metadata_review(self, *, select_first: bool = False) -> None:
         """Enter review explicitly; lookup can highlight a first track for context."""
@@ -766,56 +648,6 @@ class MainWindow(QMainWindow):
 
         return pane
 
-    def _diff_pane(self) -> QWidget:
-        pane = QWidget()
-        layout = QVBoxLayout(pane)
-        layout.setSpacing(4)
-        layout.setContentsMargins(0, 0, 0, 0)
-        scope = QHBoxLayout()
-        scope.addWidget(QLabel("Metadata ·", pane))
-        scope.addWidget(self.review_scope_label, 1)
-        scope.addWidget(self.previous_file_button)
-        scope.addWidget(self.next_file_button)
-        scope.addWidget(self.undo_review_button)
-        layout.addLayout(scope)
-        detail_actions = QHBoxLayout()
-        detail_actions.addWidget(self.field_guidance_label, 1)
-        detail_actions.addWidget(self.field_details_button)
-        layout.addLayout(detail_actions)
-        layout.addWidget(self.diff_table_view, 1)
-        layout.addWidget(self.field_details)
-        layout.addWidget(self.proposal_combo)
-        field_actions = QHBoxLayout()
-
-        for button in (self.keep_existing_button, self.use_proposed_button, self.manual_value_button):
-            field_actions.addWidget(button)
-
-        # Removing metadata is a different decision from choosing its value.
-        # Separate it spatially and name the effect; no colour cue is required.
-        field_actions.addSpacing(16)
-        self.clear_value_button.setText("Clear selected fields")
-        self.clear_value_button.setToolTip("Remove the highlighted fields from files in this review scope")
-        field_actions.addWidget(self.clear_value_button)
-        layout.addLayout(field_actions)
-        safe_actions = QHBoxLayout()
-        safe_actions.addWidget(self.accept_safe_additions_button)
-        self.accept_safe_additions_button.setToolTip(
-            "Fill missing values with unambiguous supported proposals in this scope. Existing values remain unchanged.",
-        )
-        safe_actions.addStretch(1)
-        layout.addLayout(safe_actions)
-        layout.addWidget(QLabel("Filenames", pane))
-        layout.addWidget(self.rename_current_label)
-        layout.addWidget(self.rename_proposed_label)
-        layout.addWidget(self.rename_template_label)
-        rename_actions = QHBoxLayout()
-        rename_actions.addWidget(self.keep_filename_button)
-        rename_actions.addWidget(self.apply_rename_button)
-        rename_actions.addWidget(self.rename_previews_button)
-        layout.addLayout(rename_actions)
-        layout.addWidget(self.rename_validation_label)
-
-        return pane
 
     @Slot(QModelIndex, QModelIndex)
     def _on_group_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
