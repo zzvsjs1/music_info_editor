@@ -62,6 +62,8 @@ Splitting or merging groups retains manual values, Clear, Keep existing and file
 
 The default filename template is `[%discnumber%.]%tracknumber%. %title%`. Brackets make the enclosed content optional: disc 1, track 1 becomes `1.01. Title.flac`; without a disc number it becomes `01. Title.flac`. Settings provides the template and minimum digit widths from **1 to 10**, covering editable track/disc numbers without excessive padding. Invalid saved widths are reported and replaced with safe defaults. The original extension is retained, Windows filename problems are reported, and collisions require correction.
 
+In **Settings → Renaming**, type `%` to see all supported fields and keep typing to narrow the suggestions. Choose a field with the arrow keys and **Enter** or **Tab**, or click it. **Escape** closes the suggestions; **Ctrl+Space** reopens them inside a field. Completion replaces only that field, preserving the surrounding template. The saved template is used by every rename workflow.
+
 To rename every file shown in the current group:
 
 1. Click **Select all**, then **Rename files…**.

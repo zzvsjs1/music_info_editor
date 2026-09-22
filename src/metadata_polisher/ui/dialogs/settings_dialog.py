@@ -39,6 +39,7 @@ from metadata_polisher.infrastructure.settings import (
 from metadata_polisher.providers.catalogue import provider_label, provider_summary
 from metadata_polisher.providers.network import describe_network_route, validate_network_settings
 from metadata_polisher.rename.template import MAXIMUM_PADDING_DIGITS, parse_template
+from metadata_polisher.ui.template_edit import TemplateLineEdit
 
 
 def _integer_control(value: int, minimum: int, parent: QWidget, *, maximum: int = 2_147_483_647) -> QSpinBox:
@@ -91,7 +92,7 @@ class SettingsDialog(QDialog):
         layout = QFormLayout(page)
         self.rename_enabled = QCheckBox("Enable filename renaming", page)
         self.rename_enabled.setChecked(self._original.rename.enabled)
-        self.template_edit = QLineEdit(self._original.rename.template, page)
+        self.template_edit = TemplateLineEdit(self._original.rename.template, page)
         self.track_digits_spin = _integer_control(
             self._original.rename.minimum_track_digits, 1, page, maximum=MAXIMUM_PADDING_DIGITS,
         )
@@ -103,7 +104,8 @@ class SettingsDialog(QDialog):
         layout.addRow("Minimum track digits", self.track_digits_spin)
         layout.addRow("Minimum disc digits", self.disc_digits_spin)
         help_text = QLabel(
-            "Use fields such as %tracknumber%, %discnumber% and %title%. "
+            "Type % to choose a field, then press Enter or Tab to insert it. "
+            "Press Escape to close suggestions, or Ctrl+Space to reopen them inside a field. "
             "Put optional content in brackets, for example [%discnumber%.]. "
             "The file extension is retained automatically. Minimum digit widths are limited to 1–10: "
             "ten digits cover the largest editable track or disc number without excessive zero padding.",
