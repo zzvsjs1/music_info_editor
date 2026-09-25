@@ -46,14 +46,10 @@ ColumnLayout {
             visible: root.invalid
         }
 
-        TextField {
+        AppTextField {
             id: input
 
             anchors.fill: parent
-            leftPadding: 8
-            rightPadding: 8
-            topPadding: 4
-            bottomPadding: 4
             background.visible: !root.invalid
             Accessible.name: root.labelText
             Accessible.description: root.invalid ? root.errorText : ""

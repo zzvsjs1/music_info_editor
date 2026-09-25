@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from metadata_polisher.domain.metadata import Position
 from metadata_polisher.session.state import GroupSelection, OperationKind, SessionState
 from metadata_polisher.ui.quick.backend import QuickBackend
 from tests.ui.helpers import ControlledExecutor, make_group
@@ -104,7 +105,16 @@ def test_field_multiselection_uses_per_field_values_and_undo(backend):
 
 def test_shift_range_uses_last_clicked_anchor_and_replaces_unrelated_highlights(backend):
     group = backend.session_state.groups[0]
-    files = tuple(make_group('a', key, key).group.files[0] for key in ('one', 'two', 'three', 'four'))
+    # Give these rows distinct track positions: the default library order now
+    # follows tags, with filename tie-breaking when positions are identical.
+    files = []
+
+    for number, key in enumerate(('one', 'two', 'three', 'four'), start=1):
+        source = make_group('a', key, key).group.files[0]
+        metadata = replace(source.read_result.metadata, track=Position(number=number))
+        files.append(replace(source, read_result=replace(source.read_result, metadata=metadata)))
+
+    files = tuple(files)
     backend.set_state(replace(backend.session_state, groups=(replace(group, group=replace(group.group, files=files)),)))
     backend.selectFileExtended('one', False, False)
     backend.selectFileExtended('four', True, False)

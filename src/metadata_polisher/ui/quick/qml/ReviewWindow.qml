@@ -10,9 +10,12 @@ ApplicationWindow {
     readonly property bool interactionEnabled: !backend.busy && !backend.editing
                                                && !backend.confirmationVisible && !fullValueDialog.visible
     readonly property bool multiple: backend.scopeFileIds.length > 1 || backend.selectedFields.length > 1
+    readonly property bool scanFailed: backend.progressFailed && backend.progressKind === "scan"
     property bool layoutReady: false
     property int retainedWidth: metrics.reviewWidth
     property int retainedHeight: metrics.reviewHeight
+    property string filenameContext: ""
+    property string diagnosticContext: ""
     signal helpRequested()
 
     UiMetrics {
@@ -95,6 +98,30 @@ ApplicationWindow {
         fullValueDialog.open();
     }
 
+    Connections {
+        target: backend
+
+        function onChanged() {
+            // Reset disclosures when their subject changes, while retaining a
+            // user's expansion choice during ordinary edits of the same file.
+            const filenames = JSON.stringify(backend.scopeFileIds) + backend.hasFilenameSuggestion
+                              + (backend.filenameNeedsAttention ? backend.renameValidation : "");
+
+            if (filenames !== reviewWindow.filenameContext) {
+                reviewWindow.filenameContext = filenames;
+                filenameToggle.checked = backend.hasFilenameSuggestion || backend.filenameNeedsAttention;
+            }
+
+            const diagnostics = backend.scanSummary + backend.scanDetails
+                                + (reviewWindow.scanFailed ? backend.status : "");
+
+            if (diagnostics !== reviewWindow.diagnosticContext) {
+                reviewWindow.diagnosticContext = diagnostics;
+                diagnosticsToggle.checked = backend.scanHasWarnings || reviewWindow.scanFailed;
+            }
+        }
+    }
+
     Shortcut {
         sequence: "Escape"
         enabled: reviewWindow.visible && reviewWindow.active && !backend.editing && !fullValueDialog.visible
@@ -115,7 +142,7 @@ ApplicationWindow {
 
     Shortcut {
         sequences: ["Ctrl+Return", "Ctrl+Enter"]
-        enabled: reviewWindow.active && reviewWindow.interactionEnabled && backend.applyUi.canApply
+        enabled: reviewWindow.active && reviewWindow.interactionEnabled && backend.applyUi.canApply && backend.hasChangesToApply
         onActivated: backend.applyUi.beginApply()
     }
 
@@ -134,107 +161,144 @@ ApplicationWindow {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 9
-        spacing: 6
+        spacing: metrics.spacing
 
-        RowLayout {
+        GridLayout {
             Layout.fillWidth: true
+            columns: width >= navigation.implicitWidth + scopeControls.implicitWidth + 20 ? 2 : 1
 
-            Label {
-                objectName: "reviewTargetLabel"
+            RowLayout {
+                spacing: metrics.controlSpacing
+                id: navigation
                 Layout.fillWidth: true
-                text: "Metadata review · " + (backend.reviewTargetLabel.length ? backend.reviewTargetLabel
-                      : "0 selected — Select tracks or change the review scope")
-                textFormat: Text.PlainText
-                elide: Text.ElideMiddle
-                ToolTip.visible: targetHover.hovered
-                ToolTip.text: text
-                HoverHandler { id: targetHover }
+
+                ActionButton {
+                    objectName: "previousReviewFileButton"
+                    text: "← Previous"
+                    enabled: reviewWindow.interactionEnabled && backend.canNavigate && backend.currentFileRow > 0
+                    onClicked: backend.moveFile(-1)
+                }
+                Label {
+                    objectName: "reviewFileProgress"
+                    text: backend.fileProgress
+                    Accessible.name: "File position: " + text
+                }
+                ActionButton {
+                    objectName: "nextReviewFileButton"
+                    text: "Next →"
+                    enabled: reviewWindow.interactionEnabled && backend.canNavigate
+                             && backend.currentFileRow + 1 < backend.files.rowCount()
+                    onClicked: backend.moveFile(1)
+                }
+                Item { Layout.fillWidth: true }
             }
 
-            ComboBox {
-                objectName: "reviewScopeCombo"
-                model: ["Selected files", "Current group", "Included files", "All library files"]
-                property var keys: ["selected", "group", "included", "library"]
-                currentIndex: keys.indexOf(backend.reviewScope)
-                enabled: reviewWindow.interactionEnabled
-                Accessible.name: "Review scope"
-                onActivated: backend.setReviewScope(keys[currentIndex])
+            RowLayout {
+                spacing: metrics.controlSpacing
+                id: scopeControls
+                Label { text: "Reviewing:" }
+                AppComboBox {
+                    objectName: "reviewScopeCombo"
+                    implicitContentWidthPolicy: ComboBox.WidestText
+                    Layout.minimumWidth: implicitWidth
+                    model: ["Selected files", "Current group", "Included files", "All library files"]
+                    property var keys: ["selected", "group", "included", "library"]
+                    currentIndex: keys.indexOf(backend.reviewScope)
+                    enabled: reviewWindow.interactionEnabled
+                    Accessible.name: "Files to review"
+                    onActivated: backend.setReviewScope(keys[currentIndex])
+                }
             }
+        }
+
+        Label {
+            objectName: "reviewTargetLabel"
+            Layout.fillWidth: true
+            text: backend.reviewTargetLabel || "Select files to review their metadata."
+            textFormat: Text.PlainText
+            font.bold: true
+            elide: Text.ElideMiddle
+            ToolTip.visible: targetHover.hovered
+            ToolTip.text: text
+            HoverHandler { id: targetHover }
         }
 
         AppScrollView {
             id: reviewScroll
-
             objectName: "reviewScrollArea"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: reviewTable.minimumTableHeight
             clip: true
+            // The desktop scrollbar occupies real horizontal space. Reserve
+            // it so wrapped actions never sit underneath its input surface.
+            rightPadding: effectiveScrollBarWidth
             contentWidth: availableWidth
 
             ColumnLayout {
                 width: reviewScroll.availableWidth
+                // The table takes spare height. Only genuinely small windows or
+                // expanded details need to scroll the surrounding review content.
+                height: Math.max(reviewScroll.availableHeight, implicitHeight)
                 spacing: metrics.spacingSmall
 
-                RowLayout {
+                GridLayout {
                     Layout.fillWidth: true
-                    Label { text: "Metadata ·" }
-                    Label {
-                        Layout.fillWidth: true
-                        text: backend.reviewScopeLabel
-                        wrapMode: Text.WordWrap
-                    }
-                    ActionButton {
-                        objectName: "previousReviewFileButton"
-                        text: "Previous"
-                        enabled: reviewWindow.interactionEnabled && backend.canNavigate && backend.currentFileRow > 0
-                        onClicked: backend.moveFile(-1)
-                    }
-                    ActionButton {
-                        objectName: "nextReviewFileButton"
-                        text: "Next"
-                        enabled: reviewWindow.interactionEnabled && backend.canNavigate
-                                 && backend.currentFileRow + 1 < backend.files.rowCount()
-                        onClicked: backend.moveFile(1)
-                    }
-                    ActionButton {
-                        objectName: "undoReviewButton"
-                        text: "Undo review"
-                        enabled: reviewWindow.interactionEnabled && backend.canUndo
-                        onClicked: backend.undo()
-                    }
-                }
+                    columns: reviewScroll.availableWidth >= metadataTitle.implicitWidth
+                             + Math.max(safeButton.implicitWidth, safeExplanation.implicitWidth) + 24 ? 2 : 1
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    Label {
+                    ColumnLayout {
+                        id: metadataHeading
                         Layout.fillWidth: true
-                        visible: backend.selectedFields.length === 0
-                        text: backend.selectedFields.length ? "" : "Select a field, or double-click its Final value to edit."
-                        wrapMode: Text.WordWrap
+                        spacing: 2
+                        Label {
+                            id: metadataTitle
+                            Layout.fillWidth: true
+                            text: "1  Metadata review"
+                            font.bold: true
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: backend.reviewScopeLabel
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            color: palette.placeholderText
+                        }
                     }
-                    ActionButton {
-                        id: detailsButton
-                        Layout.fillWidth: true
-                        objectName: "fieldDetailsButton"
-                        text: checked ? "Full values ▾" : "Full values ▸"
-                        checkable: true
-                        enabled: backend.selectedFields.length > 0
+                    ColumnLayout {
+                        id: safeSuggestions
+                        spacing: 2
+                        ActionButton {
+                            id: safeButton
+                            objectName: "acceptSafeAdditionsButton"
+                            Layout.alignment: Qt.AlignRight
+                            text: "Accept safe suggestions"
+                            enabled: reviewWindow.interactionEnabled && backend.canAcceptSafe
+                            onClicked: backend.reviewAction("accept_safe_additions")
+                        }
+                        Label {
+                            id: safeExplanation
+                            text: "Only confident, non-conflicting additions."
+                            color: palette.placeholderText
+                        }
                     }
                 }
 
                 DataTable {
                     id: reviewTable
-
                     objectName: "reviewTable"
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.max(195, reviewScroll.availableHeight - 278)
+                    Layout.fillHeight: true
+                    Layout.minimumHeight: 195
+                    Layout.preferredHeight: 195
                     model: backend.review
                     enabled: reviewWindow.interactionEnabled
                     currentRow: backend.currentFieldRow
                     columnWidths: scaledWidths(metrics.reviewColumns)
+                    columnOrder: [0, 2, 3, 4, 1, 5]
+                    stretchColumns: [2, 3, 4]
                     hiddenColumns: metrics.hiddenReviewColumns
                     protectedColumn: 0
-                    stretchLastColumn: true
                     emptyText: "Select one or more files to inspect their metadata."
 
                     onRowSelected: function(stableId, toggle, extend) {
@@ -262,9 +326,71 @@ ApplicationWindow {
                     onSelectAllRequested: backend.selectAllFields()
                     onClearSelectionRequested: backend.clearFieldSelection()
                     onEditRequested: backend.beginEdit()
+                    onValueRequested: function(value) { reviewWindow.openDetails(value); }
+                }
 
-                    onValueRequested: function(value) {
-                        reviewWindow.openDetails(value);
+                AppComboBox {
+                    objectName: "proposalCombo"
+                    Layout.fillWidth: true
+                    model: backend.proposalOptions
+                    textRole: "label"
+                    valueRole: "key"
+                    // A single suggestion is already visible in the table.
+                    visible: !reviewWindow.multiple && count > 1
+                    enabled: reviewWindow.interactionEnabled && backend.canUseCandidate
+                    currentIndex: indexOfValue(backend.proposalKey)
+                    Accessible.name: "Proposed value to use"
+                    onActivated: backend.setProposal(currentValue)
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: metrics.controlSpacing
+                    ActionButton {
+                        objectName: "keepExistingButton"
+                        text: "Keep existing"
+                        enabled: reviewWindow.interactionEnabled && backend.canEdit
+                        onClicked: backend.reviewAction("keep_existing")
+                    }
+                    ActionButton {
+                        objectName: "useProposedButton"
+                        text: "Use proposed"
+                        highlighted: true
+                        enabled: reviewWindow.interactionEnabled && backend.canUseCandidate
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Use each selected field's proposed value for the files being reviewed."
+                        onClicked: backend.reviewAction("use_candidate")
+                    }
+                    ActionButton {
+                        objectName: "manualValueButton"
+                        text: "Edit…"
+                        enabled: reviewWindow.interactionEnabled && backend.canEdit
+                        ToolTip.visible: hovered
+                        ToolTip.text: reviewWindow.multiple ? "Set a common value for the selected fields and files."
+                                                          : "Edit the Final value (F2)."
+                        onClicked: backend.beginEdit()
+                    }
+                    ActionButton {
+                        objectName: "moreFieldActionsButton"
+                        text: "More…"
+                        flat: true
+                        enabled: reviewWindow.interactionEnabled && backend.canEdit
+                        onClicked: fieldMenu.popup()
+                    }
+                    ActionButton {
+                        objectName: "undoReviewButton"
+                        text: "Undo review"
+                        flat: true
+                        enabled: reviewWindow.interactionEnabled && backend.canUndo
+                        onClicked: backend.undo()
+                    }
+                    ActionButton {
+                        id: detailsButton
+                        objectName: "fieldDetailsButton"
+                        text: checked ? "Hide full values" : "Show full values"
+                        flat: true
+                        checkable: true
+                        enabled: backend.selectedFields.length > 0
                     }
                 }
 
@@ -289,193 +415,185 @@ ApplicationWindow {
                     }
                 }
 
-                ComboBox {
-                    objectName: "proposalCombo"
+                RowLayout {
+                    spacing: metrics.controlSpacing
                     Layout.fillWidth: true
-                    model: backend.proposalOptions
-                    textRole: "label"
-                    valueRole: "key"
-                    visible: !reviewWindow.multiple
-                    enabled: reviewWindow.interactionEnabled && backend.canUseCandidate
-                    currentIndex: indexOfValue(backend.proposalKey)
-                    onActivated: backend.setProposal(currentValue)
-                }
-
-                GridLayout {
-                    id: fieldActions
-                    Layout.fillWidth: true
-                    readonly property real widestAction: Math.max(keepAction.implicitWidth,
-                        candidateAction.implicitWidth, manualAction.implicitWidth, clearAction.implicitWidth + 16)
-                    columns: width >= 4 * widestAction + 3 * columnSpacing ? 4
-                             : width >= 2 * widestAction + columnSpacing ? 2 : 1
-
-                    // Keep complete action labels at larger text sizes. A narrow
-                    // review uses additional rows inside its existing scroll area.
-                    ActionButton {
-                        id: keepAction
-                        objectName: "keepExistingButton"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: implicitWidth
-                        Layout.preferredWidth: 1
-                        text: "Keep Existing"
-                        enabled: reviewWindow.interactionEnabled && backend.canEdit
-                        onClicked: backend.reviewAction("keep_existing")
+                    ToolButton {
+                        id: filenameToggle
+                        objectName: "filenameSectionButton"
+                        text: (checked ? "▾" : "▸") + "  2  Filename review"
+                        checkable: true
+                        checked: backend.hasFilenameSuggestion || backend.filenameNeedsAttention
+                        Accessible.name: (checked ? "Collapse" : "Expand") + " filename review"
                     }
-                    ActionButton {
-                        id: candidateAction
-                        objectName: "useProposedButton"
+                    Label {
                         Layout.fillWidth: true
-                        Layout.minimumWidth: implicitWidth
-                        Layout.preferredWidth: 1
-                        text: reviewWindow.multiple ? "Use each file's candidate" : "Use candidate"
-                        enabled: reviewWindow.interactionEnabled && backend.canUseCandidate
-                        onClicked: backend.reviewAction("use_candidate")
-                    }
-                    ActionButton {
-                        id: manualAction
-                        objectName: "manualValueButton"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: implicitWidth
-                        Layout.preferredWidth: 1
-                        text: reviewWindow.multiple ? "Set common value…" : "Manual…"
-                        enabled: reviewWindow.interactionEnabled && backend.canEdit
-                        onClicked: backend.beginEdit()
-                    }
-                    ActionButton {
-                        id: clearAction
-                        objectName: "clearValueButton"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: implicitWidth
-                        Layout.leftMargin: fieldActions.columns === 4 ? 16 : 0
-                        Layout.preferredWidth: 1
-                        text: "Clear selected fields"
-                        enabled: reviewWindow.interactionEnabled && backend.canEdit
-                        onClicked: backend.reviewAction("clear")
-                    }
-                }
-
-                ActionButton {
-                    objectName: "acceptSafeAdditionsButton"
-                    text: "Accept Safe Additions"
-                    enabled: reviewWindow.interactionEnabled && backend.canAcceptSafe
-                    onClicked: backend.reviewAction("accept_safe_additions")
-                }
-
-                Label { text: "Filenames" }
-
-                Repeater {
-                    model: [backend.scopeFileIds.length > 1 ? "Current filenames: " + backend.currentFilename
-                                                           : "Current filename: " + (backend.currentFilename || "—"),
-                            backend.scopeFileIds.length > 1 ? "Proposed filenames: each file has its own reviewed preview"
-                                                           : "Proposed filename: " + (backend.proposedFilename || "—"),
-                            "Template: " + backend.renameTemplate]
-                    delegate: Label {
-                        required property string modelData
-                        Layout.fillWidth: true
-                        text: modelData
+                        text: backend.filenameSummary
+                        elide: Text.ElideRight
                         textFormat: Text.PlainText
-                        elide: Text.ElideMiddle
-                        ToolTip.visible: filenameHover.hovered
+                        ToolTip.visible: filenameSummaryHover.hovered
                         ToolTip.text: text
-                        HoverHandler { id: filenameHover }
+                        HoverHandler { id: filenameSummaryHover }
                     }
                 }
 
-                GridLayout {
-                    id: filenameActions
+                ColumnLayout {
+                    objectName: "filenameDetails"
                     Layout.fillWidth: true
-                    readonly property real widestAction: Math.max(keepFilenameAction.implicitWidth,
-                        proposedFilenameAction.implicitWidth, previewsAction.implicitWidth)
-                    columns: width >= 3 * widestAction + 2 * columnSpacing ? 3
-                             : width >= 2 * widestAction + columnSpacing ? 2 : 1
+                    visible: filenameToggle.checked
+                    spacing: metrics.spacingSmall
 
-                    ActionButton {
-                        id: keepFilenameAction
-                        objectName: "keepFilenameButton"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: implicitWidth
-                        Layout.preferredWidth: 1
-                        text: "Keep filename"
-                        enabled: reviewWindow.interactionEnabled && backend.canKeepFilename
-                        onClicked: backend.renameAction(false)
+                    Repeater {
+                        model: ["Current: " + (backend.currentFilename || "No files selected"),
+                                "Proposed: " + (backend.proposedFilename || "No suggestion")]
+                        delegate: Label {
+                            required property string modelData
+                            Layout.fillWidth: true
+                            text: modelData
+                            textFormat: Text.PlainText
+                            elide: Text.ElideMiddle
+                            ToolTip.visible: filenameHover.hovered
+                            ToolTip.text: text
+                            HoverHandler { id: filenameHover }
+                        }
                     }
-                    ActionButton {
-                        id: proposedFilenameAction
-                        objectName: "applyRenameButton"
+
+                    Flow {
                         Layout.fillWidth: true
-                        Layout.minimumWidth: implicitWidth
-                        Layout.preferredWidth: 1
-                        text: "Use proposed filename"
-                        enabled: reviewWindow.interactionEnabled && backend.canRename
-                        onClicked: backend.renameAction(true)
+                        spacing: metrics.controlSpacing
+                        ActionButton {
+                            objectName: "keepFilenameButton"
+                            text: "Keep current"
+                            enabled: reviewWindow.interactionEnabled && backend.canKeepFilename
+                            onClicked: backend.renameAction(false)
+                        }
+                        ActionButton {
+                            objectName: "applyRenameButton"
+                            text: "Use proposed"
+                            enabled: reviewWindow.interactionEnabled && backend.canRename
+                            onClicked: backend.renameAction(true)
+                        }
+                        ActionButton {
+                            objectName: "renamePreviewsButton"
+                            text: "Filename previews…"
+                            flat: true
+                            enabled: reviewWindow.interactionEnabled && backend.scopeFileIds.length > 0
+                            onClicked: backend.applyUi.showPreviews()
+                        }
+                        ActionButton {
+                            id: templateToggle
+                            text: "Filename details"
+                            flat: true
+                            checkable: true
+                        }
                     }
-                    ActionButton {
-                        id: previewsAction
-                        objectName: "renamePreviewsButton"
+                    Label {
                         Layout.fillWidth: true
-                        Layout.minimumWidth: implicitWidth
-                        Layout.preferredWidth: 1
-                        text: "Filename previews…"
-                        enabled: reviewWindow.interactionEnabled && backend.scopeFileIds.length > 0
-                        onClicked: backend.applyUi.showPreviews()
+                        text: "Template: " + backend.renameTemplate
+                        visible: templateToggle.checked
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: backend.renameValidation
+                        visible: text.length > 0
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WrapAnywhere
                     }
                 }
 
-                Label {
+                RowLayout {
+                    spacing: metrics.controlSpacing
                     Layout.fillWidth: true
-                    text: backend.renameValidation
-                    textFormat: Text.PlainText
-                    wrapMode: Text.WrapAnywhere
+                    ToolButton {
+                        id: diagnosticsToggle
+                        objectName: "scanDetailsButton"
+                        text: (checked ? "▾" : "▸") + "  Scan details"
+                        checkable: true
+                        checked: backend.scanHasWarnings || reviewWindow.scanFailed
+                        Accessible.name: (checked ? "Hide" : "View") + " scan details"
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: reviewWindow.scanFailed ? "Scan failed · Previous review retained"
+                              : (backend.scanHasWarnings ? "Warning · " : "") + backend.scanSummary
+                        visible: backend.scanSummary.length > 0
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        ToolTip.visible: scanHover.hovered
+                        ToolTip.text: text
+                        HoverHandler { id: scanHover }
+                    }
+                }
+                AppScrollView {
+                    objectName: "reviewDiagnostics"
+                    implicitHeight: metrics.diagnosticHeight
+                    height: metrics.diagnosticHeight
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: metrics.diagnosticHeight
+                    Layout.minimumHeight: metrics.diagnosticHeight
+                    Layout.maximumHeight: metrics.diagnosticHeight
+                    visible: diagnosticsToggle.checked
+                    clip: true
+                    contentWidth: availableWidth
+                    TextArea {
+                        objectName: "reviewMessageLabel"
+                        text: backend.scanDetails + (backend.status.length ? "\n" + backend.status : "")
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.WrapAnywhere
+                        Accessible.name: "Scan and review diagnostics"
+                    }
                 }
             }
         }
 
+        // Keep the final action outside the scrolling body at every size.
         ColumnLayout {
             objectName: "reviewFooter"
             Layout.fillWidth: true
             spacing: metrics.spacingSmall
 
-            Label { text: "Write batch · " + backend.includedFileIds.length + " included for writing" }
             Label {
                 Layout.fillWidth: true
-                text: "Review decisions stay in memory. Only Apply changes in the final confirmation writes files."
-                wrapMode: Text.WordWrap
+                text: backend.reviewMessage
+                visible: text.length > 0
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                maximumLineCount: 1
+                ToolTip.visible: statusHover.hovered
+                ToolTip.text: text
+                HoverHandler { id: statusHover }
             }
-            AppScrollView {
+            RowLayout {
+                spacing: metrics.controlSpacing
                 Layout.fillWidth: true
-                Layout.preferredHeight: 60
-                Layout.maximumHeight: 60
-                implicitHeight: 60
-                visible: backend.status.length > 0
-                clip: true
-                contentWidth: availableWidth
-                TextArea {
-                    objectName: "reviewMessageLabel"
-                    text: backend.status
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: TextEdit.WrapAnywhere
+                Label {
+                    Layout.fillWidth: true
+                    text: "Changes to apply · " + backend.changesToApplySummary
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    ToolTip.visible: applySummaryHover.hovered
+                    ToolTip.text: text + "\nReview decisions stay in memory until final confirmation."
+                    HoverHandler { id: applySummaryHover }
                 }
-            }
-            Label {
-                Layout.fillWidth: true
-                text: backend.applyUi.guidance
-                wrapMode: Text.WordWrap
-            }
-            Flow {
-                Layout.fillWidth: true
-                spacing: metrics.spacing
                 ActionButton {
                     objectName: "includeReviewScopeButton"
-                    text: "Add scope to write batch"
+                    text: backend.reviewScope === "selected" ? "Add selected files" : "Add reviewed files"
                     enabled: reviewWindow.interactionEnabled && backend.scopeFileIds.length > 0
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Add the files being reviewed to Changes to apply. This does not write files."
                     onClicked: backend.includeScope()
                 }
-
                 ActionButton {
                     objectName: "reviewApplyButton"
-                    text: "Review changes…"
-                    enabled: reviewWindow.interactionEnabled && backend.applyUi.canApply
+                    text: "Review && Apply…"
+                    Accessible.name: "Review & Apply"
+                    highlighted: true
+                    enabled: reviewWindow.interactionEnabled && backend.applyUi.canApply && backend.hasChangesToApply
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Inspect the changes before the final write confirmation (Ctrl+Enter)."
                     onClicked: backend.applyUi.beginApply()
                 }
             }
@@ -495,23 +613,25 @@ ApplicationWindow {
 
         MenuSeparator { }
         MenuItem {
-            text: reviewWindow.multiple ? "Set common value…\tF2" : "Manual…\tF2"
+            text: "Edit…\tF2"
             enabled: backend.canEdit
             onTriggered: backend.beginEdit()
         }
         MenuItem {
-            text: "Keep Existing"
+            text: "Keep existing"
             enabled: backend.canEdit
             onTriggered: backend.reviewAction("keep_existing")
         }
 
         MenuItem {
             objectName: "useCandidateContextAction"
-            text: reviewWindow.multiple ? "Use each file's candidate" : "Use candidate"
+            text: "Use proposed"
             enabled: backend.canUseCandidate
             onTriggered: backend.reviewAction("use_candidate")
         }
+        MenuSeparator { }
         MenuItem {
+            objectName: "clearValueButton"
             text: "Clear selected fields"
             enabled: backend.canEdit
             onTriggered: backend.reviewAction("clear")

@@ -361,8 +361,8 @@ def test_musicbrainz_contact_error_is_inline_and_clears_on_edit(musicbrainz_cont
     assert message.isVisible() and message.property("text") == facade.contactError
     assert border.isVisible() and border.opacity() > 0
     assert not native_background.isVisible()
-    assert field.property("leftPadding") == 8 and field.property("rightPadding") == 8
-    assert field.property("topPadding") == 4 and field.property("bottomPadding") == 4
+    assert field.property("leftPadding") == 12 and field.property("rightPadding") == 12
+    assert field.property("topPadding") == 7 and field.property("bottomPadding") == 7
     description_left = description.mapToScene(QPointF(description.property("leftPadding"), 0)).x()
     message_left = message.mapToScene(QPointF(message.property("leftPadding"), 0)).x()
     assert abs(message_left - description_left) <= 1

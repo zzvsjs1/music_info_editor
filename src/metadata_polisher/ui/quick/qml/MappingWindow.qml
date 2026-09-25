@@ -73,8 +73,9 @@ ApplicationWindow {
             columns: [
                 { key: "file", label: "Local file", width: 230 },
                 { key: "title", label: "Local title", width: 180 },
-                { key: "duration", label: "Duration", width: 70 },
-                { key: "assignment", label: "Provider track", width: 280, custom: true },
+                { key: "duration", label: "Duration", width: 70, sortType: "duration" },
+                { key: "assignment", label: "Provider track", width: 280, custom: true,
+                  sortValueKey: "track", sortType: "number", sortMissingValue: -1 },
                 { key: "evidence", label: "Assignment evidence", width: 220 }
             ]
 
@@ -95,7 +96,17 @@ ApplicationWindow {
                         if (activeFocus) {
                             // Keyboard editing and the full-evidence pane follow
                             // the same local file, even after the draft refreshes.
+                            const changesSelection = table.currentId !== rowData.id
                             table.currentId = rowData.id
+
+                            // Selecting a different ListView row can synchronously
+                            // move focus from its editor to the row itself. Restore
+                            // the editor once after that selection has settled. A
+                            // nested activation sees the same id, so it cannot
+                            // repeat this restoration or steal focus later.
+                            if (changesSelection && !activeFocus && window.active && lookup.mappingVisible) {
+                                selector.forceActiveFocus()
+                            }
                         }
                     }
 

@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import Property, QObject, Qt, QUrl, Signal, Slot
 
-from metadata_polisher.application.changes import ChangeIssueSeverity, RenameDecision
+from metadata_polisher.application.apply_summary import ApplySummary, build_apply_summary
+from metadata_polisher.application.changes import ChangeIssueCode, ChangeIssueSeverity, RenameDecision
 from metadata_polisher.application.scanning import ScanLibraryResult, ScanLibraryService
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position
 from metadata_polisher.domain.review import FieldDecisionKind, FieldReviewState, FieldValue
@@ -33,6 +34,7 @@ from metadata_polisher.infrastructure.diagnostics import ThreadSafeOperationIds
 from metadata_polisher.infrastructure.logging_setup import redact_sensitive_text
 from metadata_polisher.infrastructure.session_credentials import SessionCredentials
 from metadata_polisher.infrastructure.settings import AppSettings, RenameSettings
+from metadata_polisher.session.apply_preparation import reviewed_file_ids
 from metadata_polisher.session.review_editing import (
     BatchReviewAction,
     BatchReviewCommand,
@@ -169,11 +171,13 @@ class QuickBackend(QObject):
         self._status = "Choose a music folder, scan it, then select files to review."
         self._progress = -1.0
         self._albums = GroupListModel(parent=self)
-        self._album_proxy = QuickTableModel(self._albums, self)
+        self._album_proxy = QuickTableModel(self._albums, self, sortable=True)
         self._files = FileTableModel(parent=self)
         self._review = MetadataDiffModel(parent=self)
-        self._file_proxy = QuickTableModel(self._files, self)
+        self._file_proxy = QuickTableModel(self._files, self, sortable=True)
         self._review_proxy = QuickTableModel(self._review, self)
+        self._album_proxy.sortingChanged.connect(self._sorting_changed)
+        self._file_proxy.sortingChanged.connect(self._sorting_changed)
         self.bridge.operation_event.connect(self._on_event)
         self.bridge.completed.connect(self._on_completed)
         self.bridge.cancelled.connect(self._on_cancelled)
@@ -271,7 +275,9 @@ class QuickBackend(QObject):
         if self._scope == "included":
             return tuple(key for key in ids if key in self._included)
 
-        return tuple(key for key in self._selected if key in ids)
+        # Visual sorting changes navigation, while commands retain canonical
+        # library order just like the group, included, and whole-library scopes.
+        return tuple(key for key in ids if key in self._selected)
 
     def _group_id(self) -> str:
         group = self._group()
@@ -340,18 +346,26 @@ class QuickBackend(QObject):
         return "Enter a value. Use Clear field to remove it. Mixed selections start empty."
 
     def _current_file_row(self) -> int:
-        group = self._group()
-        if group is None or not self._selected:
+        if self._group() is None or not self._selected:
             return -1
 
-        return next(
-            (
-                index
-                for index, source in enumerate(group.group.files)
-                if source.file_id == (self._file_focus or self._selected[-1])
-            ),
-            -1,
-        )
+        ids = self._file_proxy.visible_ids()
+        focus = self._file_focus or self._selected[-1]
+
+        return ids.index(focus) if focus in ids else -1
+
+    def _current_group_row(self) -> int:
+        ids = self._album_proxy.visible_ids()
+        focus = "@unsupported" if isinstance(self.session_state.selection, UnsupportedSelection) else self._group_id()
+
+        return ids.index(focus) if focus in ids else -1
+
+    def _sorting_changed(self) -> None:
+        # A header only rearranges presentation identities. Keep both anchors
+        # and the semantic session untouched, and publish their new row numbers.
+        self._selected = tuple(key for key in self._file_proxy.visible_ids() if key in self._selected)
+        self._group_selection = tuple(key for key in self._album_proxy.visible_ids() if key in self._group_selection)
+        self.changed.emit()
 
     def _summary(self) -> str:
         ready = sum(classify_group(group) is GroupPresentationStatus.COMPLETE for group in self.session_state.groups)
@@ -359,6 +373,156 @@ class QuickBackend(QObject):
             f"{ready} ready · {len(self.session_state.groups) - ready} review · "
             f"{len(self.session_state.unsupported_files)} unsupported"
         )
+
+    def _file_progress(self) -> str:
+        if self._scope != "selected" or len(self._selected) != 1:
+            count = len(self._scope_ids())
+
+            return f"{count} {'file' if count == 1 else 'files'}" if count else "No files selected"
+
+        group = self._group()
+        row = self._current_file_row()
+
+        return f"{row + 1} of {len(group.group.files)}" if group is not None and row >= 0 else ""
+
+    def _review_message(self) -> str:
+        # Scan details already show a concise, pluralised success summary. The
+        # legacy status string may append settings-save warnings: retain those
+        # verbatim while suppressing only the exact duplicate success line.
+        count = sum(len(group.group.files) for group in self.session_state.groups)
+        success = f"Scanned {count} supported files in {len(self.session_state.groups)} albums."
+        first, _separator, remainder = self._status.partition("\n")
+
+        return remainder if first == success else self._status
+
+    def _review_scope_label(self) -> str:
+        ids = self._scope_ids()
+        count = len(ids)
+        suggestions = sum(
+            bool(review.proposals)
+            for group in self.session_state.groups
+            for file in group.reviewed_files
+            if file.file_id in ids
+            for review in file.reviews
+        )
+        detail = (
+            f"{suggestions} {'suggestion' if suggestions == 1 else 'suggestions'}"
+            if suggestions else "No suggestions"
+        )
+
+        return f"{count} {'file' if count == 1 else 'files'} · {detail}"
+
+    def _filename_suggestion_count(self) -> int:
+        ids = self._scope_ids()
+
+        # A preview is a suggestion, not consent to rename. Count it without
+        # changing its independent KEEP_FILENAME / APPLY_RENAME decision.
+        return sum(
+            file.change_set is not None and file.change_set.rename_preview is not None
+            for group in self.session_state.groups
+            for file in group.reviewed_files
+            if file.file_id in ids
+        )
+
+    def _filename_summary(self) -> str:
+        if self._filename_needs_attention():
+            return "Filename needs attention"
+
+        count = self._filename_suggestion_count()
+
+        if not count:
+            return "No rename suggested"
+
+        return "Rename suggested" if len(self._scope_ids()) == 1 else (
+            f"{count} {'rename suggestion' if count == 1 else 'rename suggestions'}"
+        )
+
+    def _filename_needs_attention(self) -> bool:
+        ids = self._scope_ids()
+        filename_codes = {
+            ChangeIssueCode.INVALID_RENAME_TEMPLATE, ChangeIssueCode.RENAME_RENDER_FAILED,
+            ChangeIssueCode.INVALID_DESTINATION_FILENAME, ChangeIssueCode.FILENAME_REPAIRED,
+            ChangeIssueCode.DESTINATION_COLLISION, ChangeIssueCode.CASE_ONLY_RENAME_UNSUPPORTED,
+        }
+
+        # Failed rendering can remove the preview entirely. Keep its warning
+        # discoverable rather than treating the absent preview as a clean file.
+        return any(
+            issue.code in filename_codes
+            for group in self.session_state.groups
+            for file in group.reviewed_files
+            if file.file_id in ids and file.change_set is not None
+            for issue in file.change_set.validation.issues
+        )
+
+    def _scan_warning_count(self) -> int:
+        return len(self.session_state.scan_issues) + len(self.session_state.unsupported_files)
+
+    def _scan_summary(self) -> str:
+        if self.session_state.root is None:
+            return "No files scanned"
+
+        count = sum(len(group.group.files) for group in self.session_state.groups)
+        albums = len(self.session_state.groups)
+        summary = (
+            f"Scanned {count} {'file' if count == 1 else 'files'} "
+            f"in {albums} {'album' if albums == 1 else 'albums'}"
+        )
+        warnings = self._scan_warning_count()
+
+        return summary + (f" · {warnings} {'warning' if warnings == 1 else 'warnings'}" if warnings else "")
+
+    def _scan_details(self) -> str:
+        lines = [
+            text
+            for issue in self.session_state.scan_issues
+            for text in (issue.message, issue.technical_detail)
+            if text
+        ]
+
+        if self.session_state.unsupported_files:
+            lines.extend(("Unsupported files:", *(str(file.path) for file in self.session_state.unsupported_files)))
+
+        return redact_sensitive_text("\n".join(lines))
+
+    def _included_summary(self) -> ApplySummary:
+        # Reuse the final confirmation's pure counter so a mere inclusion or a
+        # filename preview cannot be described as a pending write. No request,
+        # transaction, or confirmation is created by reading this presentation.
+        changes = tuple(
+            file.change_set
+            for group in self.session_state.groups
+            for file in group.reviewed_files
+            if file.file_id in self._included and file.change_set is not None
+        )
+
+        return build_apply_summary(
+            changes,
+            backup_enabled=self.app_settings.backup.enabled,
+            report_enabled=self.app_settings.reports.enabled,
+        )
+
+    def _changes_to_apply_summary(self) -> str:
+        count = len(self._included)
+
+        if not count:
+            return "No changes selected"
+
+        summary = self._included_summary()
+
+        # The existing canApply gate allows opening a confirmation with current
+        # reviewed blockers. Calling those files ready would conceal the work
+        # still required, so retain the explanation until blockers are resolved.
+        if not self._included.issubset(reviewed_file_ids(self.session_state)) or summary.blocking_issues:
+            return f"{count} selected {'file needs' if count == 1 else 'files need'} review"
+
+        if not summary.write_file_count:
+            return "No changes selected"
+
+        count = summary.write_file_count
+        detail = "with changes" if self._is_busy() else "ready to apply"
+
+        return f"{count} {'file' if count == 1 else 'files'} {detail}"
 
     def _facade(self, kind: str) -> QObject:
         attribute = f"_{kind}_ui"
@@ -437,7 +601,7 @@ class QuickBackend(QObject):
         if proposed and reviewed and reviewed.change_set and reviewed.change_set.rename_preview:
             return reviewed.change_set.rename_preview.new_path.name
         if proposed:
-            return "—"
+            return "No suggestion"
         return source.path.name
 
     def _rename_validation(self) -> str:
@@ -505,14 +669,7 @@ class QuickBackend(QObject):
     groups = Property(list, _groups, notify=changed)
     groupId = Property(str, _group_id, notify=changed)
     selectedGroupIds = Property(list, lambda self: list(self._group_selection), notify=changed)
-    currentGroupRow = Property(
-        int,
-        lambda self: next(
-            (i for i, group in enumerate(self.session_state.groups) if group.group.group_id == self._group_id()),
-            len(self.session_state.groups) if isinstance(self.session_state.selection, UnsupportedSelection) else -1,
-        ),
-        notify=changed,
-    )
+    currentGroupRow = Property(int, _current_group_row, notify=changed)
     selectedFileIds = Property(list, lambda self: list(self._selected), notify=changed)
     includedFileIds = Property(list, lambda self: sorted(self._included), notify=changed)
 
@@ -521,6 +678,7 @@ class QuickBackend(QObject):
     selectedField = Property(str, lambda self: self._field.value, notify=changed)
     selectedFields = Property(list, lambda self: [field.value for field in self._fields], notify=changed)
     currentFileRow = Property(int, _current_file_row, notify=changed)
+    fileProgress = Property(str, _file_progress, notify=changed)
     currentFieldRow = Property(
         int,
         lambda self: list(MetadataField).index(self._field) if self._scope_ids() and self._fields else -1,
@@ -563,14 +721,13 @@ class QuickBackend(QObject):
     reviewScope = Property(str, lambda self: self._scope, notify=changed)
     scopeFileIds = Property(list, lambda self: list(self._scope_ids()), notify=changed)
     reviewTargetLabel = Property(str, lambda self: self._filename(False), notify=changed)
-    reviewScopeLabel = Property(
-        str,
-        lambda self: (
-            f"{len(self._scope_ids())} {'file' if len(self._scope_ids()) == 1 else 'files'} · "
-            f"{len(self._fields)} {'field' if len(self._fields) == 1 else 'fields'} in this review action"
-        ),
-        notify=changed,
-    )
+    reviewScopeLabel = Property(str, _review_scope_label, notify=changed)
+    reviewMessage = Property(str, _review_message, notify=changed)
+    changesToApplySummary = Property(str, _changes_to_apply_summary, notify=changed)
+    hasChangesToApply = Property(bool, lambda self: self._included_summary().write_file_count > 0, notify=changed)
+    scanSummary = Property(str, _scan_summary, notify=changed)
+    scanHasWarnings = Property(bool, lambda self: self._scan_warning_count() > 0, notify=changed)
+    scanDetails = Property(str, _scan_details, notify=changed)
     rootPath = Property(
         str, lambda self: str(self.session_state.root or self.app_settings.general.last_root_folder), notify=changed
     )
@@ -610,6 +767,9 @@ class QuickBackend(QObject):
     )
     currentFilename = Property(str, lambda self: self._filename(False), notify=changed)
     proposedFilename = Property(str, lambda self: self._filename(True), notify=changed)
+    filenameSummary = Property(str, _filename_summary, notify=changed)
+    hasFilenameSuggestion = Property(bool, lambda self: self._filename_suggestion_count() > 0, notify=changed)
+    filenameNeedsAttention = Property(bool, _filename_needs_attention, notify=changed)
     renameTemplate = Property(str, lambda self: self._rename.template, notify=changed)
     renameValidation = Property(str, _rename_validation, notify=changed)
     proposalOptions = Property(list, _proposals, notify=changed)
@@ -684,12 +844,17 @@ class QuickBackend(QObject):
         self._selected = tuple(file_id for file_id in self._selected if file_id in visible)
         if self._file_focus not in visible:
             self._file_focus = self._selected[-1] if self._selected else ""
+
+        # A source reset reapplies its active sort. Publish current membership
+        # first so an Include sort uses the same values as the new checkboxes.
+        self._files.set_included_file_ids(self._included)
         self._files.set_group_state(group, self.session_state.written_files)
         if isinstance(self.session_state.selection, UnsupportedSelection):
             self._files.set_unsupported_files(self.session_state.unsupported_files)
         self._albums.set_session_state(self.session_state)
+        self._selected = tuple(key for key in self._file_proxy.visible_ids() if key in self._selected)
+        self._group_selection = tuple(key for key in self._album_proxy.visible_ids() if key in self._group_selection)
         self._album_proxy.set_highlighted(frozenset(self._group_selection) if group else frozenset({"@unsupported"}))
-        self._files.set_included_file_ids(self._included)
         self._refresh_review()
 
     def _refresh_review(self) -> None:
@@ -769,7 +934,7 @@ class QuickBackend(QObject):
         if key == "@unsupported":
             self.selectGroup(key)
             return
-        ids = tuple(group.group.group_id for group in self.session_state.groups)
+        ids = tuple(key for key in self._album_proxy.visible_ids() if key != "@unsupported")
         anchor = self._group_anchor
         chosen = self._extended(ids, self._group_selection, key, toggle, extend, anchor)
         self.selectGroup(key)
@@ -780,11 +945,9 @@ class QuickBackend(QObject):
 
     @Slot(int, bool)
     def moveGroup(self, delta: int, extend: bool) -> None:
-        ids = [group.group.group_id for group in self.session_state.groups]
-        if self.session_state.unsupported_files:
-            ids.append("@unsupported")
+        ids = self._album_proxy.visible_ids()
         if ids:
-            current = ids.index(self._group_id()) if self._group_id() in ids else len(ids) - 1
+            current = self._current_group_row()
             self.selectGroupExtended(ids[max(0, min(len(ids) - 1, current + delta))], False, extend)
 
     @Slot()
@@ -792,7 +955,7 @@ class QuickBackend(QObject):
         if self._is_busy() or self._edit is not None or self._confirmation is not None:
             return
 
-        ids = tuple(group.group.group_id for group in self.session_state.groups)
+        ids = tuple(key for key in self._album_proxy.visible_ids() if key != "@unsupported")
 
         if not ids:
             return
@@ -826,7 +989,7 @@ class QuickBackend(QObject):
         group = self._group()
         if self._is_busy() or group is None:
             return
-        ids = tuple(file.file_id for file in group.group.files)
+        ids = self._file_proxy.visible_ids()
         if key not in ids:
             return
         self._selected = self._extended(ids, self._selected, key, toggle, extend, self._file_anchor)
@@ -839,8 +1002,9 @@ class QuickBackend(QObject):
     def moveFileExtended(self, delta: int, extend: bool) -> None:
         group = self._group()
         if group and group.group.files:
-            row = max(0, min(len(group.group.files) - 1, self._current_file_row() + delta))
-            self.selectFileExtended(group.group.files[row].file_id, False, extend)
+            ids = self._file_proxy.visible_ids()
+            row = max(0, min(len(ids) - 1, self._current_file_row() + delta))
+            self.selectFileExtended(ids[row], False, extend)
 
     @Slot(str, bool)
     def selectFile(self, file_id: str, toggle: bool) -> None:
@@ -854,7 +1018,7 @@ class QuickBackend(QObject):
         else:
             selected.add(file_id)
 
-        self._selected = tuple(source.file_id for source in group.group.files if source.file_id in selected)
+        self._selected = tuple(key for key in self._file_proxy.visible_ids() if key in selected)
         self._file_focus = file_id
         self._file_anchor = file_id
         self._refresh_review()
@@ -864,7 +1028,7 @@ class QuickBackend(QObject):
         group = self._group()
         if not self._is_busy() and group is not None:
             self._scope = "selected"
-            self._selected = tuple(source.file_id for source in group.group.files)
+            self._selected = self._file_proxy.visible_ids()
             self._refresh_review()
 
     @Slot()
@@ -880,8 +1044,8 @@ class QuickBackend(QObject):
         if group is None or not group.group.files:
             return
 
-        ids = [source.file_id for source in group.group.files]
-        current = ids.index(self._selected[-1]) if self._selected else (-1 if delta > 0 else len(ids))
+        ids = self._file_proxy.visible_ids()
+        current = self._current_file_row() if self._selected else (-1 if delta > 0 else len(ids))
         self.selectFile(ids[max(0, min(len(ids) - 1, current + delta))], False)
 
     @Slot(str, bool)
@@ -986,7 +1150,7 @@ class QuickBackend(QObject):
     def openReview(self) -> None:
         group = self._group()
         if not self._scope_ids() and group is not None and group.group.files:
-            self.selectFile(group.group.files[0].file_id, False)
+            self.selectFile(self._file_proxy.visible_ids()[0], False)
         self._review_visible = True
         self.changed.emit()
 

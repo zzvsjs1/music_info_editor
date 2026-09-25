@@ -19,6 +19,10 @@ from metadata_polisher.session.state import ReviewedFileState, SessionState, Ver
 # The invalid parent is read-only and represents this flat model's root.
 _ROOT_INDEX = QModelIndex()
 
+# Keep semantic absence separate from display text: an actual title can be
+# called Empty or No suggestion and must still look like ordinary metadata.
+PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole + 10
+
 DIFF_HEADERS = (
     "Field",
     "Status",
@@ -48,6 +52,7 @@ class DiffRow:
     field: MetadataField
     values: tuple[str, ...]
     tooltip: str
+    placeholder_columns: frozenset[int] = frozenset()
 
 
 def format_field_value(value: FieldValue | None) -> str:
@@ -67,6 +72,23 @@ def format_field_value(value: FieldValue | None) -> str:
         return f"{value.number or '—'}/{value.total}"
 
     return value
+
+
+def _is_empty(value: FieldValue | None) -> bool:
+    return value is None or value == () or value == Position() or value == ""
+
+
+def _display_value(value: FieldValue | None, empty_label: str = "Empty") -> str:
+    return empty_label if _is_empty(value) else format_field_value(value)
+
+
+def _existing_text(value: FieldValue | None, read_state: FieldReadState) -> str:
+    # A read failure is unavailable evidence, never an empty field which could
+    # safely receive an addition. Preserve this distinction in the value cell.
+    if read_state in {FieldReadState.UNREADABLE, FieldReadState.UNSUPPORTED}:
+        return "Unreadable" if read_state is FieldReadState.UNREADABLE else "Unsupported"
+
+    return _display_value(value)
 
 
 def _final_value(review: FieldReviewState) -> FieldValue | None:
@@ -98,20 +120,23 @@ def _sources(review: FieldReviewState) -> str:
     return "; ".join(labels)
 
 
-def _status(review: FieldReviewState, final: FieldValue | None) -> str:
+def _status(review: FieldReviewState) -> str:
     if review.read_state in {FieldReadState.UNREADABLE, FieldReadState.UNSUPPORTED}:
         return "⛔ Blocked"
 
     if review.requires_review:
-        return "⚠ Review"
+        return "Needs review"
 
-    if final == review.existing_value:
-        return "— Unchanged"
-
-    if final is None or final == () or final == Position(None, None):
-        return "🗑 Clear"
-
-    return "➕ Add" if review.existing_value is None else "✎ Replace"
+    # Describe the review decision rather than deriving an action from whether
+    # the final value happens to equal the existing value. A deliberate edit can
+    # be a semantic no-op and is still a completed review choice.
+    return {
+        FieldDecisionKind.USE_PROPOSAL: "Accepted",
+        FieldDecisionKind.KEEP_EXISTING: "Kept",
+        FieldDecisionKind.USE_MANUAL: "Edited",
+        FieldDecisionKind.CLEAR: "Cleared",
+        FieldDecisionKind.UNRESOLVED: "Needs review",
+    }[review.decision]
 
 
 def _tooltip(review: FieldReviewState) -> str:
@@ -191,8 +216,8 @@ def _diff_rows(
                 else None
             )
             status = {
-                FieldReadState.PRESENT: "○ Not reviewed",
-                FieldReadState.MISSING: "○ Not reviewed",
+                FieldReadState.PRESENT: "Needs review",
+                FieldReadState.MISSING: "Needs review",
                 FieldReadState.UNREADABLE: "✖ Unreadable",
                 FieldReadState.UNSUPPORTED: "! Unsupported",
             }[read_state]
@@ -204,12 +229,13 @@ def _diff_rows(
                     (
                         FIELD_LABELS[field],
                         status,
-                        format_field_value(existing),
-                        "—",
-                        format_field_value(existing),
+                        _existing_text(existing, read_state),
+                        "No suggestion",
+                        _existing_text(existing, read_state),
                         "—",
                     ),
                     f"Read state: {read_state.value}",
+                    frozenset({2, 3, 4} if read_state is FieldReadState.MISSING else {3}),
                 )
             )
 
@@ -227,12 +253,21 @@ def _diff_rows(
                 review.existing_value,
             ))
 
-        status = _status(review, final)
+        status = _status(review)
 
         # A receipt describes the last verified disk result. Any pending edit or
         # unresolved review takes precedence over that historical acknowledgement.
-        if field in written_fields and status == "— Unchanged":
+        if field in written_fields and status == "Kept" and final == review.existing_value:
             status = "✓ Written"
+
+        readable = review.read_state in {FieldReadState.PRESENT, FieldReadState.MISSING}
+        placeholders = frozenset(
+            column for column, absent in (
+                (2, readable and _is_empty(review.existing_value)),
+                (3, not review.proposals),
+                (4, readable and _is_empty(final)),
+            ) if absent
+        )
 
         rows.append(
             DiffRow(
@@ -240,12 +275,13 @@ def _diff_rows(
                 values=(
                     FIELD_LABELS[field],
                     status,
-                    format_field_value(review.existing_value),
-                    format_field_value(recommended),
-                    format_field_value(final),
+                    _existing_text(review.existing_value, review.read_state),
+                    _display_value(recommended, "No suggestion"),
+                    _existing_text(final, review.read_state),
                     _sources(review),
                 ),
                 tooltip=f"{_tooltip(review)}\nSources: {_sources(review)}",
+                placeholder_columns=placeholders,
             )
         )
 
@@ -294,9 +330,12 @@ class MetadataDiffModel(QAbstractTableModel):
             for group in state.groups for source in group.group.files if source.file_id in file_ids
         }
 
-        def text(value: AggregatedValue) -> str:
+        def text(value: AggregatedValue, *, proposed: bool = False) -> str:
             # Mixed is only a display label. The aggregate retains its typed state
             # so a batch command still resolves each file's own semantic value.
+            if value.state in {AggregateValueState.MISSING, AggregateValueState.EMPTY}:
+                return "No suggestion" if proposed else "Empty"
+
             return (format_field_value(value.value) if value.state is AggregateValueState.VALUE
                     else "Mixed values" if value.state is AggregateValueState.MIXED
                     else value.state.value.capitalize())
@@ -308,9 +347,12 @@ class MetadataDiffModel(QAbstractTableModel):
             details = "\n".join(f"{file_id}: {rows[index].values[2]} → {rows[index].values[4]}"
                                 for file_id, rows in per_file.items())
             rows.append(DiffRow(item.field, (
-                FIELD_LABELS[item.field], " / ".join(statuses), text(item.existing), text(item.proposed),
+                FIELD_LABELS[item.field], " / ".join(statuses), text(item.existing), text(item.proposed, proposed=True),
                 text(item.final), "Per-file sources in details",
-            ), details))
+            ), details, frozenset(
+                column for column, value in ((2, item.existing), (3, item.proposed), (4, item.final))
+                if value.state in {AggregateValueState.MISSING, AggregateValueState.EMPTY}
+            )))
 
         self.beginResetModel()
         self._rows = tuple(rows)
@@ -341,7 +383,12 @@ class MetadataDiffModel(QAbstractTableModel):
             return row.values[index.column()]
 
         if role == Qt.ItemDataRole.ToolTipRole:
-            return row.tooltip
+            # The cell's complete text stays inspectable when the table elides
+            # it, followed by the existing provenance and review diagnostics.
+            return f"{DIFF_HEADERS[index.column()]}: {row.values[index.column()]}\n{row.tooltip}"
+
+        if role == PLACEHOLDER_ROLE:
+            return index.column() in row.placeholder_columns
 
         if role == Qt.ItemDataRole.UserRole:
             # Controllers retain this enum across resets; visible row positions

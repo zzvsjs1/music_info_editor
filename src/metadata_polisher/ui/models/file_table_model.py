@@ -13,6 +13,10 @@ from metadata_polisher.session.state import GroupState, ReviewedFileState, Verif
 _ROOT_INDEX = QModelIndex()
 _NO_INCLUDED_FILES: frozenset[str] = frozenset()
 
+# Every column produces the same comparable shape. Numeric components stay
+# numeric; the final name and identity components make equal values stable.
+type FileSortKey = tuple[int, float, int, float, str, str, str]
+
 FILE_TABLE_HEADERS = (
     "Include",
     "Status",
@@ -37,6 +41,10 @@ class FileTableRow:
     values: tuple[str, ...]
     tooltip: str
     can_include: bool = True
+    track_number: int | None = None
+    disc_number: int | None = None
+    duration_seconds: float | None = None
+    match_score: float | None = None
 
 
 def _format_position(position: Position) -> str:
@@ -183,6 +191,10 @@ def _file_rows(group: GroupState, written_files: tuple[VerifiedWriteReceipt, ...
                 ),
                 tooltip=_row_tooltip(source, reviewed),
                 can_include=not group.requires_rescan,
+                track_number=metadata.track.number,
+                disc_number=metadata.disc.number,
+                duration_seconds=source.read_result.stream_info.duration_seconds,
+                match_score=mapping.score if mapping is not None else None,
             )
         )
 
@@ -278,6 +290,45 @@ class FileTableModel(QAbstractTableModel):
 
     def columnCount(self, parent: QModelIndex | QPersistentModelIndex = _ROOT_INDEX) -> int:
         return 0 if parent.isValid() else len(FILE_TABLE_HEADERS)
+
+    def sort_key(self, index: QModelIndex | QPersistentModelIndex, *, library_order: bool = False) -> FileSortKey:
+        """Return typed presentation keys without reordering scanned sources."""
+        row = self._rows[index.row()]
+        filename = row.values[2]
+        tie = (filename.casefold(), filename, row.file_id)
+
+        if library_order:
+            # A track with no disc belongs to the usual first-disc sequence.
+            # A known disc without a track follows that disc's numbered tracks;
+            # completely unnumbered files follow all numbered material by name.
+            return (
+                int(row.disc_number is None and row.track_number is None),
+                row.disc_number if row.disc_number is not None else 1,
+                int(row.track_number is None),
+                row.track_number if row.track_number is not None else 0,
+                *tie,
+            )
+
+        column = index.column()
+
+        if column == 0:
+            return (0, int(row.file_id in self._included_file_ids), 0, 0, *tie)
+
+        numeric = {
+            3: row.track_number,
+            4: row.disc_number,
+            8: row.duration_seconds,
+            10: row.match_score,
+        }
+
+        if column in numeric:
+            value = numeric[column]
+
+            return (int(value is None), value if value is not None else 0, 0, 0, *tie)
+
+        text = row.values[column]
+
+        return (0, 0, 0, 0, text.casefold(), text, row.file_id)
 
     def data(
         self,

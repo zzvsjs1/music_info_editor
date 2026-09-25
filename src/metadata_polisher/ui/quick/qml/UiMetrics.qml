@@ -10,9 +10,16 @@ QtObject {
     readonly property int windowMargin: 12
     readonly property int diagnosticHeight: 96
     readonly property int buttonMinimumWidth: 75
-    readonly property int buttonMinimumHeight: 32
+    readonly property int buttonMinimumHeight: controlMinimumHeight
     readonly property int buttonHorizontalPadding: 12
-    readonly property int buttonVerticalPadding: 6
+    readonly property int buttonVerticalPadding: controlVerticalPadding
+    // Ordinary actions and form controls share a readable desktop target. Table
+    // headers and inline editors retain their separate, compact geometry.
+    readonly property int controlMinimumHeight: 36
+    readonly property int controlHorizontalPadding: 12
+    readonly property int controlVerticalPadding: 7
+    readonly property int controlSpacing: 8
+    readonly property int formRowSpacing: 10
     readonly property int scrollBarThickness: 14
     readonly property int scrollBarThumbThickness: 5
     readonly property int scrollBarThumbInset: 2

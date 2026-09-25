@@ -226,7 +226,7 @@ def test_keep_and_clear_are_explicit_undoable_decisions(backend):
     assert backend.hasPendingWork
     assert backend.review.index(0, 4).data() == "First title"
     backend.reviewAction("clear")
-    assert backend.review.index(0, 4).data() == "—"
+    assert backend.review.index(0, 4).data() == "Empty"
     backend.undo()
     assert backend.review.index(0, 4).data() == "First title"
 

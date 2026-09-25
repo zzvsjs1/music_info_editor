@@ -206,6 +206,9 @@ def test_native_review_scrollbar_has_no_white_edge(presentation_scene, qtbot):
     backend.openReview()
     review = window.findChild(QQuickWindow, "metadataReviewWindow")
     assert review is not None and review.isVisible()
+    # Successful scans now leave secondary sections collapsed. Deliberately
+    # constrain the window to exercise the outer scrollbar's actual overflow.
+    review.resize(800, 400)
     qtbot.wait(100)
 
     scroll = _item(review, "reviewScrollArea")
@@ -289,13 +292,16 @@ def test_review_action_labels_fit_and_footer_stays_inside_with_larger_text(prese
     review.resize(600, 760)
     qtbot.wait(80)
 
-    for name in ("keepExistingButton", "useProposedButton", "manualValueButton", "clearValueButton",
+    # Clearing is now a secondary menu command; only the persistent field and
+    # filename buttons participate in this wrapping action layout.
+    for name in ("keepExistingButton", "useProposedButton", "manualValueButton",
                  "keepFilenameButton", "applyRenameButton", "renamePreviewsButton"):
         button = _item(review, name)
         assert button.width() >= button.implicitWidth() - 1, name
 
     _inside(review, _item(review, "includeReviewScopeButton"))
     _inside(review, _item(review, "reviewApplyButton"))
+    _inside(review, _item(review, "acceptSafeAdditionsButton"))
 
 
 def test_review_minimum_size_keeps_scrolling_body_and_write_actions_visible(presentation_scene, qtbot):

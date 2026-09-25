@@ -137,12 +137,12 @@ class QuickApply(QObject):
             return "Wait for the current operation to finish."
 
         if not self._included_ids():
-            return "Include files in the write batch to review and apply changes."
+            return "Add selected files to review and apply their changes."
 
         if not self._can_apply():
-            return "Some included files need a rescan or metadata review before writing."
+            return "Some selected files need a rescan or metadata review before applying changes."
 
-        return f"Review changes for {len(self._included_ids())} included files (Ctrl+Enter)."
+        return f"Review and apply changes for {len(self._included_ids())} selected files (Ctrl+Enter)."
 
     def _summary_text(self) -> str:
         confirmation = self._confirmation

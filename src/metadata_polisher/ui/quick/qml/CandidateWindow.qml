@@ -57,6 +57,7 @@ ApplicationWindow {
             preferenceKey: "CandidateDialog/candidateTable"
             scaleColumnWidths: true
             sortable: true
+            externalSorting: true
             showDetails: false
             hiddenColumns: [1, 5]
             columns: [

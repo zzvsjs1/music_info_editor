@@ -92,7 +92,7 @@ Item {
                 gridLines: true
                 columns: [
                     {key: "file", label: "File", width: 230},
-                    {key: "fields", label: "Tag fields", width: 70, detailKey: "fieldNames"},
+                    {key: "fields", label: "Tag fields", width: 70, detailKey: "fieldNames", sortType: "number"},
                     {key: "decision", label: "Filename decision", width: 130},
                     {key: "final", label: "Final filename", width: 230}
                 ]
@@ -214,7 +214,7 @@ Item {
 
             Label {
                 Layout.fillWidth: true
-                text: "Choose filenames to prepare. The next screen reviews the write batch, including pending metadata changes."
+                text: "Choose filenames to prepare. The next screen reviews all changes to apply, including metadata."
                 wrapMode: Text.WordWrap
             }
 
@@ -294,7 +294,7 @@ Item {
 
             Label {
                 Layout.fillWidth: true
-                text: owner.apply.previewRows.length + " files in this review scope. No files are being changed."
+                text: owner.apply.previewRows.length + " files being reviewed. No files are being changed."
                 wrapMode: Text.WordWrap
             }
 

@@ -17,15 +17,23 @@ ApplicationWindow {
     modality: Qt.WindowModal
     flags: Qt.Dialog
 
+    // Network controls belong to one form even though the route explanation
+    // separates its two grids. Align both control columns against the widest
+    // label rather than letting the credential fields drift to the right.
+    readonly property real networkLabelWidth: Math.max(networkRouteLabel.implicitWidth,
+        networkHostLabel.implicitWidth, networkUsernameLabel.implicitWidth,
+        networkPasswordLabel.implicitWidth)
+
     UiMetrics {
         id: metrics
     }
 
-    // The native Windows SpinBox already reserves space for its arrows. Only
-    // plain text fields need the extra inset seen in the Widgets dialogue.
-    component SettingsTextField: TextField {
-        leftPadding: 5
-        rightPadding: 5
+    // All form rows share one rhythm. The controls retain their native Qt
+    // appearance while the shared components supply readable text insets.
+    component SettingsFormGrid: GridLayout {
+        columns: 2
+        rowSpacing: metrics.formRowSpacing
+        columnSpacing: metrics.spacingLarge
     }
 
     // Qt Quick's Windows style does not supply a TabButton. Keep the tab
@@ -135,7 +143,7 @@ ApplicationWindow {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: metrics.windowMargin
-        spacing: metrics.spacing
+        spacing: metrics.controlSpacing
 
         RowLayout {
             id: tabStrip
@@ -222,6 +230,7 @@ ApplicationWindow {
             currentIndex: tabs.currentIndex
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: 0
             // Every page starts below the shared tab baseline. Keep this inset
             // on the stack so pages with different scroll containers align.
             Layout.topMargin: 5
@@ -230,10 +239,11 @@ ApplicationWindow {
                 id: renameScroll
                 clip: true
                 contentWidth: availableWidth
+                rightPadding: effectiveScrollBarWidth
 
                 ColumnLayout {
                     width: renameScroll.availableWidth
-                    spacing: 10
+                    spacing: metrics.formRowSpacing
 
                     CheckBox {
                         text: "Enable filename renaming"
@@ -242,8 +252,7 @@ ApplicationWindow {
                         onToggled: settings.setField("renameEnabled", checked)
                     }
 
-                    GridLayout {
-                        columns: 2
+                    SettingsFormGrid {
                         Layout.fillWidth: true
                         enabled: !settings.testRunning
 
@@ -251,10 +260,11 @@ ApplicationWindow {
                             text: "Filename template"
                         }
 
-                        SettingsTextField {
+                        AppTextField {
                             id: templateEdit
                             objectName: "settingsTemplate"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: settings.draft.template
                             selectByMouse: true
                             property var completion: ({})
@@ -343,7 +353,7 @@ ApplicationWindow {
                             text: "Minimum track digits"
                         }
 
-                        SpinBox {
+                        AppSpinBox {
                             Layout.fillWidth: true
                             from: 1; to: 10; editable: true
                             value: settings.draft.trackDigits
@@ -354,7 +364,7 @@ ApplicationWindow {
                             text: "Minimum disc digits"
                         }
 
-                        SpinBox {
+                        AppSpinBox {
                             Layout.fillWidth: true
                             from: 1; to: 10; editable: true
                             value: settings.draft.discDigits
@@ -378,21 +388,22 @@ ApplicationWindow {
                 id: providerScroll
                 clip: true
                 contentWidth: availableWidth
+                rightPadding: effectiveScrollBarWidth
 
                 ColumnLayout {
                     width: providerScroll.availableWidth
-                    spacing: 10
+                    spacing: metrics.formRowSpacing
 
-                    GridLayout {
-                        columns: 2
+                    SettingsFormGrid {
                         Layout.fillWidth: true
 
                         Label {
                             text: "Preferred language (auto, ja, en…)"
                         }
 
-                        SettingsTextField {
+                        AppTextField {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: settings.draft.preferredLanguage
                             enabled: !settings.testRunning
                             selectByMouse: true
@@ -403,13 +414,16 @@ ApplicationWindow {
                             text: "Lookup provider"
                         }
 
-                        ComboBox {
+                        AppComboBox {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             model: settings.providerOptions
                             textRole: "label"
                             currentIndex: root.optionIndex(settings.providerOptions, settings.draft.providerId)
                             enabled: !settings.testRunning
-                            onActivated: settings.setField("providerId", settings.providerOptions[index].id)
+                            onActivated: function(index) {
+                                settings.setField("providerId", settings.providerOptions[index].id)
+                            }
                         }
                     }
 
@@ -420,7 +434,10 @@ ApplicationWindow {
                         wrapMode: Text.WordWrap
                     }
 
-                    RowLayout {
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: metrics.controlSpacing
+
                         ActionButton {
                             text: "Test selected provider"
                             enabled: settings.testEnabled
@@ -437,6 +454,8 @@ ApplicationWindow {
                     AppScrollView {
                         Layout.fillWidth: true
                         Layout.preferredHeight: Math.min(90, testResult.implicitHeight)
+                        contentWidth: availableWidth
+                        rightPadding: effectiveScrollBarWidth
                         clip: true
 
                         TextArea {
@@ -444,6 +463,10 @@ ApplicationWindow {
                             text: settings.testStatus
                             readOnly: true
                             selectByMouse: true
+                            leftPadding: metrics.controlHorizontalPadding
+                            rightPadding: metrics.controlHorizontalPadding
+                            topPadding: metrics.controlVerticalPadding
+                            bottomPadding: metrics.controlVerticalPadding
                             wrapMode: TextEdit.Wrap
                             textFormat: TextEdit.PlainText
                         }
@@ -465,41 +488,53 @@ ApplicationWindow {
 
             AppScrollView {
                 id: networkScroll
+                objectName: "settingsNetworkScroll"
                 clip: true
                 contentWidth: availableWidth
+                rightPadding: effectiveScrollBarWidth
 
                 ColumnLayout {
                     width: networkScroll.availableWidth
-                    spacing: 10
+                    spacing: metrics.formRowSpacing
                     property bool manual: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
 
-                    GridLayout {
-                        columns: 2
+                    SettingsFormGrid {
                         Layout.fillWidth: true
 
                         Label {
+                            id: networkRouteLabel
+                            Layout.preferredWidth: root.networkLabelWidth
                             text: "External services route"
                         }
 
-                        ComboBox {
+                        AppComboBox {
+                            objectName: "settingsNetworkRoute"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             model: settings.routeOptions
                             textRole: "label"
                             currentIndex: root.optionIndex(settings.routeOptions, settings.draft.networkMode)
                             enabled: !settings.testRunning
-                            onActivated: settings.setField("networkMode", settings.routeOptions[index].id)
+                            Accessible.name: "External services route"
+                            onActivated: function(index) {
+                                settings.setField("networkMode", settings.routeOptions[index].id)
+                            }
                         }
 
                         Label {
+                            id: networkHostLabel
                             text: "HTTP proxy host"
                         }
 
-                        SettingsTextField {
+                        AppTextField {
+                            objectName: "settingsProxyHost"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: settings.draft.proxyHost
                             enabled: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
                             placeholderText: "Hostname or IP address, without http://"
                             selectByMouse: true
+                            Accessible.name: "HTTP proxy host"
                             onTextEdited: settings.setField("proxyHost", text)
                         }
 
@@ -507,10 +542,12 @@ ApplicationWindow {
                             text: "Port"
                         }
 
-                        SpinBox {
+                        AppSpinBox {
+                            objectName: "settingsProxyPort"
                             from: 0; to: 2147483647; editable: true
                             value: settings.draft.proxyPort
                             enabled: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
+                            Accessible.name: "Port"
                             onValueModified: settings.setField("proxyPort", value)
                         }
                     }
@@ -522,38 +559,49 @@ ApplicationWindow {
                         wrapMode: Text.WordWrap
                     }
 
-                    GridLayout {
-                        columns: 2
+                    SettingsFormGrid {
                         Layout.fillWidth: true
                         enabled: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
 
                         Label {
+                            id: networkUsernameLabel
+                            Layout.preferredWidth: root.networkLabelWidth
                             text: "Session proxy username"
                         }
 
-                        SettingsTextField {
+                        AppTextField {
                             id: usernameEdit
+                            objectName: "settingsProxyUsername"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: settings.username
                             selectByMouse: true
+                            Accessible.name: "Session proxy username"
                             onTextEdited: settings.setCredentials(text, passwordEdit.text)
                         }
 
                         Label {
+                            id: networkPasswordLabel
                             text: "Session proxy password"
                         }
 
-                        SettingsTextField {
+                        AppTextField {
                             id: passwordEdit
+                            objectName: "settingsProxyPassword"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: settings.password
                             echoMode: TextInput.Password
                             selectByMouse: true
+                            Accessible.name: "Session proxy password"
                             onTextEdited: settings.setCredentials(usernameEdit.text, text)
                         }
                     }
 
-                    RowLayout {
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: metrics.controlSpacing
+
                         ActionButton {
                             text: "Save for this session"
                             enabled: !settings.testRunning
@@ -589,10 +637,11 @@ ApplicationWindow {
                 id: outputScroll
                 clip: true
                 contentWidth: availableWidth
+                rightPadding: effectiveScrollBarWidth
 
                 ColumnLayout {
                     width: outputScroll.availableWidth
-                    spacing: 10
+                    spacing: metrics.formRowSpacing
                     enabled: !settings.testRunning
 
                     CheckBox {
@@ -607,8 +656,11 @@ ApplicationWindow {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        SettingsTextField {
+                        spacing: metrics.controlSpacing
+
+                        AppTextField {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: settings.draft.backupDirectory
                             selectByMouse: true
                             onTextEdited: settings.setField("backupDirectory", text)
@@ -636,8 +688,11 @@ ApplicationWindow {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        SettingsTextField {
+                        spacing: metrics.controlSpacing
+
+                        AppTextField {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: settings.draft.reportsDirectory
                             placeholderText: "Blank uses the application reports directory"
                             selectByMouse: true
@@ -662,140 +717,165 @@ ApplicationWindow {
                 }
             }
 
-            ColumnLayout {
-                enabled: !settings.testRunning
+            AppScrollView {
+                id: toolsScroll
+                clip: true
+                contentWidth: availableWidth
+                rightPadding: effectiveScrollBarWidth
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    Label {
-                        text: "Tool name"
-                        Layout.preferredWidth: 160
-                        font.bold: true
-                    }
+                ColumnLayout {
+                    width: toolsScroll.availableWidth
+                    spacing: metrics.formRowSpacing
+                    enabled: !settings.testRunning
 
-                    Label {
-                        text: "Executable path"
+                    RowLayout {
+                        id: toolsHeader
                         Layout.fillWidth: true
-                        font.bold: true
-                    }
-                }
+                        spacing: metrics.controlSpacing
 
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    color: root.palette.base
-                    border.color: root.palette.mid
-
-                    // A plain item accepts a custom white viewport under the
-                    // native Windows style, which disallows replacing Frame's
-                    // background and content item.
-                    ListView {
-                        id: toolsList
-                        objectName: "settingsToolsTable"
-                        anchors.fill: parent
-                        anchors.margins: 1
-                        clip: true
-                        model: settings.tools
-                        property string selectedName: ""
-                        activeFocusOnTab: true
-                        keyNavigationEnabled: false
-                        currentIndex: {
-                            for (let index = 0; index < model.length; ++index) {
-                                if (model[index].name === selectedName)
-                                    return index
-                            }
-
-                            return -1
+                        Label {
+                            text: "Tool name"
+                            Layout.preferredWidth: 160
+                            font.bold: true
                         }
 
-                        // The saved name owns selection. A sorted model refresh
-                        // must not retarget Remove selected to the old row number.
-                        function selectIndex(index) {
-                            if (index >= 0 && index < count) {
-                                selectedName = model[index].name
-                                positionViewAtIndex(index, ListView.Contain)
-                            }
-                        }
-
-                        Keys.onUpPressed: selectIndex(Math.max(0, currentIndex - 1))
-                        Keys.onDownPressed: selectIndex(Math.min(count - 1, currentIndex + 1))
-                        Keys.onPressed: function(event) {
-                            if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
-                                selectIndex(event.key === Qt.Key_Home ? 0 : count - 1)
-                                event.accepted = true
-                            }
-                        }
-                        ScrollBar.vertical: AppScrollBar {}
-
-                        delegate: ItemDelegate {
-                            id: toolDelegate
-                            required property var modelData
-                            required property int index
-                            width: ListView.view.width
-                            highlighted: ListView.isCurrentItem
-                            contentItem: RowLayout {
-                                Label {
-                                    text: modelData.name
-                                    color: toolDelegate.highlighted ? palette.highlightedText : palette.text
-                                    Layout.preferredWidth: 160
-                                    elide: Text.ElideRight
-                                }
-
-                                Label {
-                                    text: modelData.path
-                                    color: toolDelegate.highlighted ? palette.highlightedText : palette.text
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideMiddle
-                                }
-                            }
-                            ToolTip.visible: hovered
-                            ToolTip.text: modelData.path
-
-                            onClicked: {
-                                toolsList.selectedName = modelData.name
-                                toolsList.forceActiveFocus()
-                            }
+                        Label {
+                            text: "Executable path"
+                            Layout.fillWidth: true
+                            font.bold: true
                         }
                     }
-                }
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    SettingsTextField {
+                    Rectangle {
+                        Layout.fillWidth: true
+                        // Keep a useful list viewport in a short window. The
+                        // surrounding form can scroll without moving Save/Cancel.
+                        Layout.preferredHeight: Math.max(120, toolsScroll.availableHeight
+                            - toolsHeader.implicitHeight - toolName.implicitHeight
+                            - toolActions.implicitHeight - toolsHelp.implicitHeight
+                            - 4 * metrics.formRowSpacing)
+                        color: root.palette.base
+                        border.color: root.palette.mid
+
+                        // A plain item accepts a custom white viewport under the
+                        // native Windows style, which disallows replacing Frame's
+                        // background and content item.
+                        ListView {
+                            id: toolsList
+                            objectName: "settingsToolsTable"
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            clip: true
+                            model: settings.tools
+                            property string selectedName: ""
+                            activeFocusOnTab: true
+                            keyNavigationEnabled: false
+                            currentIndex: {
+                                for (let index = 0; index < model.length; ++index) {
+                                    if (model[index].name === selectedName)
+                                        return index
+                                }
+
+                                return -1
+                            }
+
+                            // The saved name owns selection. A sorted model refresh
+                            // must not retarget Remove selected to the old row number.
+                            function selectIndex(index) {
+                                if (index >= 0 && index < count) {
+                                    selectedName = model[index].name
+                                    positionViewAtIndex(index, ListView.Contain)
+                                }
+                            }
+
+                            Keys.onUpPressed: selectIndex(Math.max(0, currentIndex - 1))
+                            Keys.onDownPressed: selectIndex(Math.min(count - 1, currentIndex + 1))
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
+                                    selectIndex(event.key === Qt.Key_Home ? 0 : count - 1)
+                                    event.accepted = true
+                                }
+                            }
+                            ScrollBar.vertical: AppScrollBar {}
+
+                            delegate: ItemDelegate {
+                                id: toolDelegate
+                                required property var modelData
+                                required property int index
+                                width: ListView.view.width
+                                highlighted: ListView.isCurrentItem
+                                contentItem: RowLayout {
+                                    spacing: metrics.controlSpacing
+
+                                    Label {
+                                        text: modelData.name
+                                        color: toolDelegate.highlighted ? palette.highlightedText : palette.text
+                                        Layout.preferredWidth: 160
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Label {
+                                        text: modelData.path
+                                        color: toolDelegate.highlighted ? palette.highlightedText : palette.text
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideMiddle
+                                    }
+                                }
+                                ToolTip.visible: hovered
+                                ToolTip.text: modelData.path
+
+                                onClicked: {
+                                    toolsList.selectedName = modelData.name
+                                    toolsList.forceActiveFocus()
+                                }
+                            }
+                        }
+                    }
+
+                    AppTextField {
                         id: toolName
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         placeholderText: "Tool name"
                         selectByMouse: true
+                        Accessible.name: "Tool name"
                     }
 
-                    ActionButton {
-                        text: "Browse executable…"
-                        onClicked: {
-                            if (!toolName.text.trim()) {
-                                settings.addTool("", "")
-                                return
+                    Flow {
+                        id: toolActions
+                        Layout.fillWidth: true
+                        spacing: metrics.controlSpacing
+
+                        ActionButton {
+                            text: "Browse executable…"
+                            onClicked: {
+                                if (!toolName.text.trim()) {
+                                    settings.addTool("", "")
+                                    return
+                                }
+
+                                executablePicker.toolName = toolName.text
+                                executablePicker.open()
                             }
+                        }
 
-                            executablePicker.toolName = toolName.text
-                            executablePicker.open()
+                        ActionButton {
+                            objectName: "removeExternalTool"
+                            text: "Remove selected"
+                            enabled: toolsList.currentIndex >= 0
+                            onClicked: {
+                                settings.removeTool(toolsList.selectedName)
+                                toolsList.selectedName = ""
+                            }
                         }
                     }
 
-                    ActionButton {
-                        objectName: "removeExternalTool"
-                        text: "Remove selected"
-                        enabled: toolsList.currentIndex >= 0
-                        onClicked: {
-                            settings.removeTool(toolsList.selectedName)
-                            toolsList.selectedName = ""
-                        }
+                    Label {
+                        id: toolsHelp
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: "Enter a tool name and choose its executable. Reusing a name replaces its saved path."
                     }
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "Enter a tool name and choose its executable. Reusing a name replaces its saved path."
                 }
             }
         }
@@ -806,6 +886,8 @@ ApplicationWindow {
             visible: settings.error.length > 0
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(72, errorText.implicitHeight)
+            contentWidth: availableWidth
+            rightPadding: effectiveScrollBarWidth
             clip: true
 
             TextArea {
@@ -813,6 +895,10 @@ ApplicationWindow {
                 text: settings.error
                 readOnly: true
                 selectByMouse: true
+                leftPadding: metrics.controlHorizontalPadding
+                rightPadding: metrics.controlHorizontalPadding
+                topPadding: metrics.controlVerticalPadding
+                bottomPadding: metrics.controlVerticalPadding
                 wrapMode: TextEdit.Wrap
                 textFormat: TextEdit.PlainText
             }
@@ -820,6 +906,8 @@ ApplicationWindow {
 
         RowLayout {
             Layout.fillWidth: true
+            spacing: metrics.controlSpacing
+
             Item {
                 Layout.fillWidth: true
             }

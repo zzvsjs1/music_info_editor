@@ -69,12 +69,13 @@ ApplicationWindow {
             showDetails: false
             columns: [
                 { key: "reason", label: "Reason", width: 210 },
-                { key: "contribution", label: "Contribution", width: 95 },
+                { key: "contribution", label: "Contribution", width: 95, sortType: "number" },
                 { key: "detail", label: "Detail", width: 420 }
             ]
 
-            // This read-only snapshot retains supplied ordering and zero-valued
-            // reasons. An ordinal distinguishes repeated reason codes safely.
+            // This read-only snapshot starts in supplied order and retains
+            // zero-valued reasons. Its ordinal identity survives visual sorting
+            // and safely distinguishes repeated reason codes.
             rows: root.rows.map(function(row, index) {
                 return { id: String(index), reason: row.reason,
                          contribution: row.contribution, detail: row.detail }

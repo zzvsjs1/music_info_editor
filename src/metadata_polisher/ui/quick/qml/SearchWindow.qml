@@ -50,68 +50,81 @@ ApplicationWindow {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: metrics.windowMargin
-        spacing: metrics.spacing
+        spacing: metrics.controlSpacing
 
-        GridLayout {
+        // Keep the error and acceptance actions visible while short windows
+        // scroll the form. Larger controls must not push the footer off screen.
+        AppScrollView {
+            id: searchBody
+            objectName: "quickSearchBody"
             Layout.fillWidth: true
-            columns: 2
-            columnSpacing: metrics.spacing
-            rowSpacing: metrics.spacing
+            Layout.fillHeight: true
+            Layout.minimumHeight: 0
+            contentWidth: availableWidth
+            rightPadding: effectiveScrollBarWidth
+            clip: true
 
-            Label {
-                text: "Album"
-            }
+            GridLayout {
+                width: searchBody.availableWidth
+                columns: 2
+                columnSpacing: metrics.spacingLarge
+                rowSpacing: metrics.formRowSpacing
 
-            TextField {
-                id: album
-                objectName: "quickSearchAlbum"
-                Layout.fillWidth: true
-                leftPadding: 5
-                rightPadding: 5
-                onAccepted: window.acceptDraft()
-            }
-
-            Label {
-                text: "Artists (separate with ;)"
-            }
-
-            TextField {
-                id: artists
-                objectName: "quickSearchArtists"
-                Layout.fillWidth: true
-                leftPadding: 5
-                rightPadding: 5
-                onAccepted: window.acceptDraft()
-            }
-
-            Label {
-                text: "Year"
-            }
-
-            SpinBox {
-                id: year
-                objectName: "quickSearchYear"
-                from: 0
-                to: 9999
-                editable: true
-                textFromValue: function(value) {
-                    return value === 0 ? "Any year" : String(value)
+                Label {
+                    text: "Album"
                 }
 
-                valueFromText: function(text) {
-                    return text === "Any year" ? 0 : Number(text)
+                AppTextField {
+                    id: album
+                    objectName: "quickSearchAlbum"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+
+                    onAccepted: window.acceptDraft()
                 }
 
-                // Commit the editable text before accepting. The number may
-                // otherwise still contain its previous value while it has focus.
-                Keys.onReturnPressed: {
-                    value = valueFromText(contentItem.text)
-                    window.acceptDraft()
+                Label {
+                    text: "Artists (separate with ;)"
                 }
 
-                Keys.onEnterPressed: {
-                    value = valueFromText(contentItem.text)
-                    window.acceptDraft()
+                AppTextField {
+                    id: artists
+                    objectName: "quickSearchArtists"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+
+                    onAccepted: window.acceptDraft()
+                }
+
+                Label {
+                    text: "Year"
+                }
+
+                AppSpinBox {
+                    id: year
+                    objectName: "quickSearchYear"
+                    from: 0
+                    to: 9999
+                    editable: true
+                    textFromValue: function(value) {
+                        return value === 0 ? "Any year" : String(value)
+                    }
+
+                    valueFromText: function(text) {
+                        return text === "Any year" ? 0 : Number(text)
+                    }
+
+                    // Commit the editable text before accepting. The number may
+                    // otherwise still contain its previous value while it has focus.
+                    Keys.onReturnPressed: {
+                        value = valueFromText(contentItem.text)
+                        window.acceptDraft()
+                    }
+
+                    Keys.onEnterPressed: {
+                        value = valueFromText(contentItem.text)
+                        window.acceptDraft()
+                    }
                 }
             }
         }
@@ -120,13 +133,9 @@ ApplicationWindow {
             text: lookup.searchError
         }
 
-        Item {
-            Layout.fillHeight: true
-        }
-
         RowLayout {
             Layout.alignment: Qt.AlignRight
-            spacing: metrics.spacing
+            spacing: metrics.controlSpacing
 
             ActionButton {
                 objectName: "quickSearchAccept"

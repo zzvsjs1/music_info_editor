@@ -12,6 +12,11 @@ Control {
     property var columnWidths: []
     property var columnTitles: model ? model.columnTitles : []
     property var hiddenColumns: []
+    // These lists contain model column indices. Moving their visual positions
+    // must not change persisted widths or the field identified by a command.
+    property var columnOrder: []
+    property var stretchColumns: []
+    property var appliedColumnOrder: []
     property int protectedColumn: -1
     property bool compactRows: false
     property int rowHeight: Math.max(compactRows ? 16 : 29,
@@ -23,6 +28,13 @@ Control {
     property int headerAlignment: Qt.AlignHCenter
     property bool stretchLastColumn: false
     property bool inclusionColumn: false
+    // Sorting is opt-in: metadata fields keep their deliberate review order.
+    // These indices are logical model columns, just like persisted widths.
+    property bool sortable: false
+    property int sortColumn: -1
+    property bool sortDescending: false
+    property var defaultSortColumns: []
+    property string defaultSortLabel: ""
     property string emptyText: "No rows to display."
     property int currentRow: -1
     // Reserve the style's scrollbar thickness even before a model starts to
@@ -50,6 +62,8 @@ Control {
     signal clearSelectionRequested()
     signal activateRequested()
     signal editRequested()
+    signal sortRequested(int column, bool descending)
+    signal restoreDefaultSortRequested()
 
     activeFocusOnTab: true
     focusPolicy: Qt.StrongFocus
@@ -77,14 +91,118 @@ Control {
     onCurrentRowChanged: Qt.callLater(revealCurrentRow)
     onHiddenColumnsChanged: { if (table) table.forceLayout(); }
     onColumnWidthsChanged: { if (table) table.forceLayout(); }
-    onWidthChanged: { if (table && stretchLastColumn) table.forceLayout(); }
+    onColumnOrderChanged: Qt.callLater(applyColumnOrder)
+    onStretchColumnsChanged: { if (table) table.forceLayout(); }
+    onWidthChanged: { if (table && (stretchLastColumn || stretchColumns.length)) table.forceLayout(); }
     onRowHeightChanged: { if (table) table.forceLayout(); }
+
+    Component.onCompleted: Qt.callLater(applyColumnOrder)
+
+    function applyColumnOrder() {
+        if (!table || table.columns === 0) {
+            return;
+        }
+
+        let order = [];
+
+        // Ignore invalid or duplicated entries and append omitted columns.
+        // This also lets a table restore optional detail columns later without
+        // changing which logical columns its header menu and callbacks mean.
+        for (let column of columnOrder) {
+            if (Number.isInteger(column) && column >= 0 && column < table.columns
+                    && order.indexOf(column) < 0) {
+                order.push(column);
+            }
+        }
+
+        for (let column = 0; column < table.columns; column++) {
+            if (order.indexOf(column) < 0) {
+                order.push(column);
+            }
+        }
+
+        if (JSON.stringify(order) === JSON.stringify(appliedColumnOrder)) {
+            return;
+        }
+
+        table.clearColumnReordering();
+        let current = Array.from({length: table.columns}, function(_, column) { return column; });
+
+        for (let destination = 0; destination < order.length; destination++) {
+            const source = current.indexOf(order[destination]);
+
+            if (source !== destination) {
+                table.moveColumn(source, destination);
+                current.splice(destination, 0, current.splice(source, 1)[0]);
+            }
+        }
+
+        appliedColumnOrder = order;
+        table.forceLayout();
+    }
+
+    function requestSort(column) {
+        if (!sortable) {
+            return;
+        }
+
+        sortRequested(column, column === sortColumn ? !sortDescending : false);
+        root.forceActiveFocus();
+        Qt.callLater(revealCurrentRow);
+    }
+
+    function preferredColumnWidth(column) {
+        const explicit = table.explicitColumnWidth(visualColumn(column));
+        return explicit >= 36 ? explicit : (columnWidths[column] || 160);
+    }
+
+    function logicalColumn(visual) {
+        return visual < appliedColumnOrder.length ? appliedColumnOrder[visual] : visual;
+    }
+
+    function visualColumn(logical) {
+        const visual = appliedColumnOrder.indexOf(logical);
+        return visual >= 0 ? visual : logical;
+    }
+
+    function stretchedValueWidth(column) {
+        const explicit = table.explicitColumnWidth(visualColumn(column));
+
+        if (explicit >= 36) {
+            return explicit;
+        }
+
+        let preferredTotal = 0;
+        let flexible = [];
+
+        for (let other = 0; other < columnTitles.length; other++) {
+            if (hiddenColumns.indexOf(other) >= 0) {
+                continue;
+            }
+
+            preferredTotal += preferredColumnWidth(other);
+
+            if (stretchColumns.indexOf(other) >= 0 && table.explicitColumnWidth(visualColumn(other)) < 36) {
+                flexible.push(other);
+            }
+        }
+
+        // Reserve the compact fixed columns first, then share spare space
+        // between values. User-resized columns retain their exact widths;
+        // narrower windows keep the readable defaults and scroll horizontally.
+        const spare = Math.max(0, table.width - preferredTotal);
+        const position = flexible.indexOf(column);
+        const share = position < 0 ? 0
+            : Math.floor(spare * (position + 1) / flexible.length)
+              - Math.floor(spare * position / flexible.length);
+        return preferredColumnWidth(column) + share;
+    }
 
     function storedWidths() {
         let widths = [];
 
         for (let column = 0; column < columnTitles.length; column++) {
-            let resized = table.explicitColumnWidth(column);
+            let resized = table.explicitColumnWidth(visualColumn(column));
             widths.push(resized >= 36 ? resized : (columnWidths[column] || 160));
         }
 
@@ -198,17 +316,47 @@ Control {
             }
 
             delegate: Rectangle {
+                id: headerCell
                 required property var display
+                required property int column
+                readonly property int defaultPriority: root.defaultSortColumns.indexOf(column)
+                readonly property bool sorted: root.sortable && (column === root.sortColumn
+                    || (root.sortColumn < 0 && defaultPriority >= 0))
+                objectName: "sortHeader" + column
 
                 implicitHeight: root.headerHeight
                 color: palette.button
                 border.color: root.gridColour
+                activeFocusOnTab: root.sortable
+                Accessible.role: root.sortable ? Accessible.Button : Accessible.ColumnHeader
+                Accessible.name: display + (sorted
+                    ? (root.sortDescending ? ", descending" : ", ascending")
+                      + (root.sortColumn < 0 ? ", priority " + (defaultPriority + 1) : "") : "")
+                Accessible.description: root.sortable ? "Activate to sort by this column" : ""
+                Accessible.onPressAction: root.requestSort(column)
+                Keys.onSpacePressed: root.requestSort(column)
+                Keys.onReturnPressed: root.requestSort(column)
+
+                // Passive tap handling leaves the header's existing drag
+                // gesture available for column resizing. A drag never sorts.
+                TapHandler {
+                    enabled: root.sortable
+                    acceptedButtons: Qt.LeftButton
+                    gesturePolicy: TapHandler.DragThreshold
+                    onTapped: root.requestSort(headerCell.column)
+                }
+
+                HoverHandler { id: headerHover }
+                ToolTip.visible: root.sortable && headerHover.hovered
+                ToolTip.delay: 900
+                ToolTip.text: "Sort by " + display + (sorted && root.sortColumn < 0
+                    ? " · " + root.defaultSortLabel : "")
 
                 Label {
                     anchors.fill: parent
                     anchors.leftMargin: 8
-                    anchors.rightMargin: 8
-                    text: parent.display
+                    anchors.rightMargin: headerCell.sorted ? sortIndicator.width + 12 : 8
+                    text: headerCell.display
                     textFormat: Text.PlainText
                     verticalAlignment: Text.AlignVCenter
                     horizontalAlignment: root.headerAlignment
@@ -216,6 +364,23 @@ Control {
                     elide: Text.ElideRight
                 }
 
+                Label {
+                    id: sortIndicator
+                    anchors.right: parent.right
+                    anchors.rightMargin: 5
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: headerCell.sorted
+                    text: (root.sortDescending ? "↓" : "↑")
+                        + (root.sortColumn < 0 ? headerCell.defaultPriority + 1 : "")
+                    font.pixelSize: Math.max(9, textMetrics.height * 0.8)
+                }
+
+                Rectangle {
+                    anchors.fill: parent
+                    visible: headerCell.activeFocus
+                    color: "transparent"
+                    border.color: palette.highlight
+                }
             }
         }
 
@@ -242,36 +407,45 @@ Control {
                 color: root.palette.base
             }
 
-            columnWidthProvider: function(column) {
+            columnWidthProvider: function(visual) {
+                // Qt's sizing APIs use visual positions, while delegate roles
+                // still expose model indices. Convert here so the compact
+                // Status column cannot inherit a metadata value's saved width.
+                const column = root.logicalColumn(visual);
+
                 if (root.hiddenColumns.indexOf(column) >= 0) {
                     return 0;
                 }
 
-                let last = root.columnTitles.length - 1;
-
-                while (last >= 0 && root.hiddenColumns.indexOf(last) >= 0) {
-                    last--;
+                if (root.stretchColumns.indexOf(column) >= 0) {
+                    return root.stretchedValueWidth(column);
                 }
 
-                if (root.stretchLastColumn && column === last) {
+                let lastVisual = root.columnTitles.length - 1;
+
+                while (lastVisual >= 0 && root.hiddenColumns.indexOf(root.logicalColumn(lastVisual)) >= 0) {
+                    lastVisual--;
+                }
+
+                if (root.stretchLastColumn && visual === lastVisual) {
                     let previousWidth = 0;
 
-                    for (let other = 0; other < last; other++) {
+                    for (let position = 0; position < lastVisual; position++) {
+                        const other = root.logicalColumn(position);
+
                         if (root.hiddenColumns.indexOf(other) < 0) {
-                            let explicit = table.explicitColumnWidth(other);
-                            previousWidth += explicit >= 36 ? explicit : (root.columnWidths[other] || 160);
+                            previousWidth += root.preferredColumnWidth(other);
                         }
                     }
 
                     // Stretch supplies a minimum useful width, but it must
                     // not discard a user's explicit resize when Qt evaluates
                     // the provider again after a model or layout update.
-                    const explicit = table.explicitColumnWidth(column);
-                    const preferred = explicit >= 36 ? explicit : (root.columnWidths[column] || 160);
+                    const preferred = root.preferredColumnWidth(column);
                     return Math.max(preferred, table.width - previousWidth);
                 }
 
-                let resized = table.explicitColumnWidth(column);
+                let resized = table.explicitColumnWidth(visual);
                 if (resized >= 36) {
                     return resized;
                 }
@@ -284,6 +458,7 @@ Control {
             }
 
             onRowsChanged: Qt.callLater(root.revealCurrentRow)
+            onColumnsChanged: Qt.callLater(root.applyColumnOrder)
 
             // The attached bar still follows TableView's content position,
             // while its visual parent is the dedicated gutter below the view.
@@ -319,6 +494,12 @@ Control {
                 required property string stableId
                 required property bool highlighted
                 required property bool included
+                required property var model
+                // Optional roles keep the generic table compatible with small
+                // standalone models while the application supplies richer
+                // explanations and semantic empty-value formatting.
+                readonly property bool placeholder: Boolean(model.placeholder)
+                readonly property string tooltip: model.tooltip === undefined ? display : model.tooltip
 
                 implicitWidth: 160
                 implicitHeight: root.rowHeight
@@ -349,7 +530,8 @@ Control {
                     visible: !(root.inclusionColumn && cell.column === 0)
                     text: cell.display
                     textFormat: Text.PlainText
-                    color: cell.highlighted ? palette.highlightedText : palette.text
+                    color: cell.highlighted ? palette.highlightedText
+                           : cell.placeholder ? palette.placeholderText : palette.text
                     elide: Text.ElideRight
                     verticalAlignment: Text.AlignVCenter
                 }
@@ -436,18 +618,22 @@ Control {
                 ToolTip {
                     id: valueTip
 
-                    visible: cellMouse.containsMouse && cell.display.length > 0
+                    visible: cellMouse.containsMouse && cell.tooltip.length > 0
                     delay: 900
                     width: Math.min(360, implicitWidth)
-                    text: cell.display.length > 300
-                          ? cell.display.slice(0, 300) + "…"
-                          : cell.display
+                    text: cell.tooltip.length > 300
+                          ? cell.tooltip.slice(0, 300) + "…"
+                          : cell.tooltip
 
                     // ToolTip is a popup; wrapping belongs to its text item.
                     contentItem: Label {
                         text: valueTip.text
                         textFormat: Text.PlainText
                         wrapMode: Text.WrapAnywhere
+                        // Embedded newlines can make even a short string tall.
+                        // Full values remain available in the details surface.
+                        maximumLineCount: 12
+                        elide: Text.ElideRight
                     }
                 }
             }
@@ -481,6 +667,18 @@ Control {
     Menu {
         id: headerMenu
 
+        MenuItem {
+            objectName: "restoreDefaultSortAction"
+            text: root.defaultSortLabel
+            visible: root.sortable && root.defaultSortLabel.length > 0
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                root.restoreDefaultSortRequested();
+                root.forceActiveFocus();
+                Qt.callLater(root.revealCurrentRow);
+            }
+        }
+
         Instantiator {
             model: root.columnTitles
 
@@ -506,7 +704,7 @@ Control {
                 }
             }
 
-            onObjectAdded: function(index, object) { headerMenu.insertItem(index, object); }
+            onObjectAdded: function(index, object) { headerMenu.insertItem(index + 1, object); }
             onObjectRemoved: function(index, object) { headerMenu.removeItem(object); }
         }
     }

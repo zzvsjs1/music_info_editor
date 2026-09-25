@@ -248,11 +248,11 @@ def test_diff_model_uses_field_order_five_columns_sources_reasons_and_no_mutatio
         "Genres",
     )
     assert model.data(model.index(0, 0), Qt.ItemDataRole.DisplayRole) == "Title"
-    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "—"
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Empty"
     assert model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole) == "Provider opening"
     assert model.data(model.index(0, 4), Qt.ItemDataRole.DisplayRole) == "Provider opening"
     assert model.data(model.index(0, 5), Qt.ItemDataRole.DisplayRole) == "musicbrainz / musicbrainz"
-    assert "Add" in model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole)
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == "Accepted"
     assert "PROPOSAL_CONFIDENT" in model.data(
         model.index(0, 4),
         Qt.ItemDataRole.ToolTipRole,
@@ -272,11 +272,11 @@ def test_diff_model_shows_existing_values_for_an_unreviewed_scanned_file(qapp) -
 
     assert model.rowCount() == len(MetadataField)
     assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "Opening"
-    assert model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole) == "—"
+    assert model.data(model.index(0, 3), Qt.ItemDataRole.DisplayRole) == "No suggestion"
     assert model.data(model.index(0, 4), Qt.ItemDataRole.DisplayRole) == "Opening"
-    assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == "○ Not reviewed"
-    assert model.data(model.index(4, 2), Qt.ItemDataRole.DisplayRole) == "—"
-    assert model.data(model.index(4, 4), Qt.ItemDataRole.DisplayRole) == "—"
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == "Needs review"
+    assert model.data(model.index(4, 2), Qt.ItemDataRole.DisplayRole) == "Empty"
+    assert model.data(model.index(4, 4), Qt.ItemDataRole.DisplayRole) == "Empty"
 
 
 def test_final_position_shows_the_retained_component_from_the_actual_change_set(qapp) -> None:
@@ -373,7 +373,7 @@ def test_diff_constructor_rejects_review_state_for_another_file(qapp) -> None:
 @pytest.mark.parametrize(
     ("read_state", "expected_status"),
     (
-        (FieldReadState.MISSING, "○ Not reviewed"),
+        (FieldReadState.MISSING, "Needs review"),
         (FieldReadState.UNREADABLE, "✖ Unreadable"),
         (FieldReadState.UNSUPPORTED, "! Unsupported"),
     ),
@@ -393,8 +393,9 @@ def test_unreviewed_diff_does_not_expose_non_present_latent_values(
     )
     model = MetadataDiffModel(source)
 
-    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == "—"
-    assert model.data(model.index(0, 4), Qt.ItemDataRole.DisplayRole) == "—"
+    expected_value = "Empty" if read_state is FieldReadState.MISSING else read_state.value.capitalize()
+    assert model.data(model.index(0, 2), Qt.ItemDataRole.DisplayRole) == expected_value
+    assert model.data(model.index(0, 4), Qt.ItemDataRole.DisplayRole) == expected_value
     assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == expected_status
     assert read_state.value in model.data(model.index(0, 0), Qt.ItemDataRole.ToolTipRole)
 

@@ -106,6 +106,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentWidth: availableWidth
+            rightPadding: effectiveScrollBarWidth
             clip: true
 
             ColumnLayout {
@@ -117,13 +118,13 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     columns: 2
                     columnSpacing: metrics.spacingLarge
-                    rowSpacing: metrics.spacing
+                    rowSpacing: metrics.formRowSpacing
 
                     Label {
                         text: "Number"
                     }
 
-                    SpinBox {
+                    AppSpinBox {
                         id: numberSpin
 
                         objectName: "manualEditNumber"
@@ -144,7 +145,7 @@ ApplicationWindow {
                         text: "Total"
                     }
 
-                    SpinBox {
+                    AppSpinBox {
                         id: totalSpin
 
                         objectName: "manualEditTotal"
@@ -165,7 +166,7 @@ ApplicationWindow {
                 RowLayout {
                     visible: !editor.positionValue
                     Layout.fillWidth: true
-                    spacing: metrics.spacing
+                    spacing: metrics.controlSpacing
 
                     Label {
                         Layout.alignment: Qt.AlignTop
@@ -221,6 +222,7 @@ ApplicationWindow {
         DialogButtonBox {
             Layout.fillWidth: true
             alignment: Qt.AlignRight
+            spacing: metrics.controlSpacing
             onAccepted: editor.acceptValue()
             onRejected: backend.cancelEdit()
 

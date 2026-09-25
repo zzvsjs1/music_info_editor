@@ -137,18 +137,19 @@ ApplicationWindow {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: window.compactHeight ? metrics.spacing : 9
-        // Slightly tighter section gaps keep the minimum-height window usable
-        // without reducing its font, diagnostic viewport or action targets.
+        anchors.margins: window.compactHeight ? metrics.spacingSmall : 9
+        // At minimum height, decorative margins and section gaps give space to
+        // readable controls. Action groups keep their full shared spacing; the
+        // diagnostic viewport and complete first table row remain available.
         spacing: window.compactHeight ? metrics.spacingCompact : metrics.spacing
         RowLayout {
+            spacing: metrics.controlSpacing
             Layout.fillWidth: true
-            TextField {
+            AppTextField {
                 id: folderPath
                 objectName: "folderPath"
                 Layout.fillWidth: true
-                leftPadding: 5
-                rightPadding: 5
+
                 text: backend.rootPath
                 enabled: window.interactionEnabled
                 placeholderText: "Choose a music library folder"
@@ -176,7 +177,7 @@ ApplicationWindow {
         // no longer fit a single row. The workspace receives the remaining height.
         Flow {
             Layout.fillWidth: true
-            spacing: metrics.spacing
+            spacing: metrics.controlSpacing
             ActionButton {
                 objectName: "findSelectedButton"
                 text: "Find Metadata for Selected"
@@ -198,14 +199,14 @@ ApplicationWindow {
             }
 
             RowLayout {
+                spacing: metrics.controlSpacing
                 Label {
                     text: "Language:"
                 }
 
-                ComboBox {
+                AppComboBox {
                     objectName: "languageCombo"
-                    Layout.preferredWidth: Math.max(125, implicitContentWidth + leftPadding + rightPadding)
-                    Layout.preferredHeight: Math.max(metrics.buttonMinimumHeight, implicitHeight)
+                    Layout.preferredWidth: Math.max(125, implicitWidth)
                     model: backend.lookupUi.languageChoices
                     textRole: "label"
                     valueRole: "value"
@@ -249,11 +250,11 @@ ApplicationWindow {
                 objectName: "albumsPane"
                 SplitView.preferredWidth: metrics.albumPaneWidth
                 SplitView.minimumWidth: 150
-                spacing: window.compactHeight ? metrics.spacingSmall : metrics.spacing
+                spacing: window.compactHeight ? metrics.spacingCompact : metrics.spacing
                 Label {
                     text: "Albums / groups"
                     Layout.leftMargin: 9
-                    Layout.topMargin: window.compactHeight ? metrics.spacingSmall : 9
+                    Layout.topMargin: window.compactHeight ? metrics.spacingCompact : 9
                 }
 
                 DataTable {
@@ -263,8 +264,14 @@ ApplicationWindow {
                     Layout.fillHeight: true
                     Layout.leftMargin: 9
                     Layout.rightMargin: 9
-                    Layout.bottomMargin: window.compactHeight ? metrics.spacingSmall : 9
+                    Layout.bottomMargin: window.compactHeight ? metrics.spacingCompact : 9
                     model: backend.albumModel
+                    sortable: backend.albumModel.sortingEnabled
+                    sortColumn: backend.albumModel.sortColumnIndex
+                    sortDescending: backend.albumModel.sortDescending
+                    onSortRequested: function(column, descending) {
+                        backend.albumModel.sortByColumn(column, descending);
+                    }
                     enabled: window.interactionEnabled
                     currentRow: backend.currentGroupRow
                     columnWidths: scaledWidths(metrics.albumColumns)
@@ -291,18 +298,18 @@ ApplicationWindow {
                 objectName: "filesPane"
                 SplitView.fillWidth: true
                 SplitView.minimumWidth: 430
-                spacing: window.compactHeight ? metrics.spacingSmall : metrics.spacing
+                spacing: window.compactHeight ? metrics.spacingCompact : metrics.spacing
                 Label {
                     text: "Files / tracks"
                     Layout.leftMargin: 9
-                    Layout.topMargin: window.compactHeight ? metrics.spacingSmall : 9
+                    Layout.topMargin: window.compactHeight ? metrics.spacingCompact : 9
                 }
 
                 Flow {
                     Layout.fillWidth: true
                     Layout.leftMargin: 9
                     Layout.rightMargin: 9
-                    spacing: window.compactHeight ? metrics.spacingSmall : metrics.spacing
+                    spacing: metrics.controlSpacing
                     ActionButton {
                         objectName: "selectAllFilesButton"
                         text: "Select all"
@@ -352,6 +359,15 @@ ApplicationWindow {
                     Layout.preferredHeight: 8 * rowHeight + headerHeight + horizontalScrollBarHeight + 2
                     enabled: window.interactionEnabled
                     model: backend.files
+                    sortable: backend.files.sortingEnabled
+                    sortColumn: backend.files.sortColumnIndex
+                    sortDescending: backend.files.sortDescending
+                    defaultSortColumns: [4, 3]
+                    defaultSortLabel: "Disc / track order"
+                    onSortRequested: function(column, descending) {
+                        backend.files.sortByColumn(column, descending);
+                    }
+                    onRestoreDefaultSortRequested: backend.files.restoreDefaultSort()
                     currentRow: backend.currentFileRow
                     inclusionColumn: true
                     columnWidths: scaledWidths(metrics.fileColumns)
@@ -383,8 +399,8 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.leftMargin: 9
                     Layout.rightMargin: 9
-                    Layout.bottomMargin: window.compactHeight ? metrics.spacingSmall : 9
-                    spacing: window.compactHeight ? metrics.spacingSmall : metrics.spacing
+                    Layout.bottomMargin: window.compactHeight ? metrics.spacingCompact : 9
+                    spacing: metrics.controlSpacing
 
                     Label {
                         id: selectionScopeLabel
@@ -413,7 +429,7 @@ ApplicationWindow {
                     ActionButton {
                         id: includeSelectedButton
                         objectName: "includeSelectedButton"
-                        text: "Add to write batch"
+                        text: "Add selected files"
                         enabled: window.interactionEnabled && backend.selectedFileIds.length > 0
                         onClicked: backend.includeSelection(true)
                     }
@@ -430,6 +446,7 @@ ApplicationWindow {
         }
 
         RowLayout {
+            spacing: metrics.controlSpacing
             Layout.fillWidth: true
             Label {
                 objectName: "summaryCountsLabel"
@@ -512,6 +529,7 @@ ApplicationWindow {
         }
 
         RowLayout {
+            spacing: metrics.controlSpacing
             Layout.fillWidth: true
             Label {
                 Layout.fillWidth: true
@@ -529,7 +547,8 @@ ApplicationWindow {
 
             ActionButton {
                 objectName: "applySelectedButton"
-                text: "Review changes…"
+                text: "Review && Apply…"
+                Accessible.name: "Review & Apply"
                 enabled: window.interactionEnabled && backend.applyUi.canApply
                 onClicked: backend.applyUi.beginApply()
             }
@@ -616,7 +635,7 @@ ApplicationWindow {
         }
 
         MenuItem {
-            text: "Add to write batch"
+            text: "Add selected files"
             onTriggered: backend.includeSelection(true)
         }
 
@@ -819,6 +838,7 @@ ApplicationWindow {
             }
 
             RowLayout {
+                spacing: metrics.controlSpacing
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignRight
                 ActionButton {
@@ -882,6 +902,7 @@ ApplicationWindow {
             }
 
             RowLayout {
+                spacing: metrics.controlSpacing
                 Layout.alignment: Qt.AlignRight
                 ActionButton {
                     id: cancelConfirmationButton
@@ -925,7 +946,7 @@ ApplicationWindow {
                 wrapMode: Text.WordWrap
             }
 
-            SpinBox {
+            AppSpinBox {
                 id: discNumber
                 from: 0
                 to: 9999
@@ -941,6 +962,7 @@ ApplicationWindow {
             }
 
             RowLayout {
+                spacing: metrics.controlSpacing
                 Layout.alignment: Qt.AlignRight
                 ActionButton {
                     text: "Cancel"

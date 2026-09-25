@@ -16,7 +16,8 @@ Control {
     property int protectedColumn: -1
     property bool stretchLastColumn: true
     property bool scaleColumnWidths: false
-    property bool sortable: false
+    property bool sortable: true
+    property bool externalSorting: false
     property bool showDetails: true
     property bool gridLines: false
     property Component cellDelegate: null
@@ -27,7 +28,9 @@ Control {
     // full details or checkboxes between model notification and the next frame.
     property int currentIndex: -1
     readonly property alias count: list.count
-    readonly property var currentRow: currentIndex >= 0 && currentIndex < rows.length ? rows[currentIndex] : null
+    readonly property var displayRows: sortedRows()
+    readonly property var currentRow: currentIndex >= 0 && currentIndex < displayRows.length
+        ? displayRows[currentIndex] : null
     readonly property string details: rowDetails(currentRow)
     property string sortKey: ""
     property bool sortDescending: false
@@ -52,6 +55,70 @@ Control {
     readonly property real horizontalScrollBarHeight: horizontalScrollBar.implicitHeight
     readonly property color gridColour: Qt.tint(palette.base,
         Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.15))
+
+    function sortValue(row, column) {
+        const value = row[column.sortValueKey || column.key];
+
+        // Display placeholders and explicit sentinels describe unavailable
+        // values. Keep them after meaningful values in either direction.
+        if (value === undefined || value === null || value === column.sortMissingValue
+                || String(value).trim() === "" || value === "—") {
+            return null;
+        }
+
+        if (column.sortType === "duration") {
+            const parts = String(value).split(":");
+
+            if (parts.some(function(part) { return !/^\d+$/.test(part); })) {
+                return null;
+            }
+
+            // Durations are displayed as m:ss. Accumulating base-60 parts
+            // compares minutes numerically and also supports an h:mm:ss value.
+            return parts.reduce(function(total, part) { return total * 60 + Number(part); }, 0);
+        }
+
+        if (column.sortType === "number" || typeof value === "number" || typeof value === "boolean") {
+            const number = Number(value);
+            return Number.isFinite(number) ? number : null;
+        }
+
+        return String(value).toLocaleLowerCase();
+    }
+
+    function sortedRows() {
+        // A facade can retain its existing ranking and specialised comparator.
+        // Other tables sort a projection only: caller rows and write decisions
+        // stay unchanged, and equal values retain their supplied order.
+        if (!sortable || externalSorting || !sortKey) {
+            return rows;
+        }
+
+        const column = columns.find(function(item) { return item.key === sortKey; });
+
+        if (!column) {
+            return rows;
+        }
+
+        const decorated = rows.map(function(row, index) {
+            return {row: row, index: index, value: sortValue(row, column)};
+        });
+        const direction = sortDescending ? -1 : 1;
+        decorated.sort(function(left, right) {
+            if (left.value === null && right.value !== null) {
+                return 1;
+            }
+
+            if (right.value === null && left.value !== null) {
+                return -1;
+            }
+
+            const comparison = left.value < right.value ? -1 : left.value > right.value ? 1 : 0;
+            return comparison ? direction * comparison : left.index - right.index;
+        });
+
+        return decorated.map(function(item) { return item.row; });
+    }
 
     function restoreColumns() {
         // Widgets configure_columns scales its starting widths to the font;
@@ -119,7 +186,7 @@ Control {
     }
 
     function restoreSelection() {
-        const index = rows.findIndex(function(row) { return String(row.id) === currentId; });
+        const index = displayRows.findIndex(function(row) { return String(row.id) === currentId; });
         currentIndex = index;
 
         if (index >= 0) {
@@ -156,11 +223,11 @@ Control {
     }
 
     function selectRow(index) {
-        if (index < 0 || index >= rows.length) {
+        if (index < 0 || index >= displayRows.length) {
             return;
         }
 
-        const id = String(rows[index].id);
+        const id = String(displayRows[index].id);
         currentIndex = index;
         rowSelected(id);
 
@@ -180,15 +247,15 @@ Control {
         if (event.key === Qt.Key_Home) {
             target = 0;
         } else if (event.key === Qt.Key_End) {
-            target = rows.length - 1;
+            target = displayRows.length - 1;
         } else if (event.key === Qt.Key_Up) {
             target = Math.max(0, target - 1);
         } else if (event.key === Qt.Key_Down) {
-            target = Math.min(rows.length - 1, target + 1);
+            target = Math.min(displayRows.length - 1, target + 1);
         } else if (event.key === Qt.Key_PageUp) {
             target = Math.max(0, target - page);
         } else if (event.key === Qt.Key_PageDown) {
-            target = Math.min(rows.length - 1, target + page);
+            target = Math.min(displayRows.length - 1, target + page);
         } else if (event.key === Qt.Key_Space && currentRow) {
             const column = columns.find(function(item) { return item.checkable === true; });
 
@@ -224,7 +291,7 @@ Control {
         }
     }
 
-    onRowsChanged: {
+    onDisplayRowsChanged: {
         if (preferencesReady) {
             restoreSelection();
         }
@@ -290,6 +357,14 @@ Control {
                             text: modelData.label
                             flat: true
                             padding: metrics.spacingSmall
+                            rightPadding: root.sortable ? metrics.spacingLarge * 2 : padding
+                            Accessible.name: modelData.label
+                            Accessible.description: !root.sortable ? "" : root.sortKey === modelData.key
+                                ? "Sorted " + (root.sortDescending ? "descending" : "ascending")
+                                    + ". Activate to reverse the order."
+                                : "Activate to sort ascending."
+                            ToolTip.visible: hovered && root.sortable
+                            ToolTip.text: Accessible.description
 
                             Rectangle {
                                 anchors.top: parent.top
@@ -370,7 +445,7 @@ Control {
                 anchors.margins: 1
                 anchors.bottomMargin: root.horizontalScrollBarHeight + 1
                 clip: true
-                model: root.rows
+                model: root.displayRows
                 currentIndex: root.currentIndex
                 contentWidth: root.totalWidth
                 flickableDirection: Flickable.AutoFlickDirection
