@@ -1,18 +1,11 @@
 """Describe session-only decisions before replacing a library or closing it."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
 
 from metadata_polisher.application.changes import RenameDecision
 from metadata_polisher.domain.review import DecisionOrigin
 from metadata_polisher.scanner.grouping import GroupingReason
 from metadata_polisher.session.state import SessionState
-
-if TYPE_CHECKING:
-    from metadata_polisher.ui.main_window import MainWindow
 
 
 @dataclass(frozen=True)
@@ -110,34 +103,3 @@ def pending_work_summary(
         edited_group_count=edited_groups,
         undo_action_count=len(state.review_undo),
     )
-
-
-def confirm_discard_pending(window: MainWindow, action: str) -> bool:
-    """Require an explicit Discard choice; Enter and Escape both preserve work."""
-    summary = pending_work_summary(window.session_state, window.included_file_ids)
-
-    if not summary.has_pending_work:
-        return True
-
-    dialog = QMessageBox(window)
-    dialog.setObjectName("discardPendingWorkDialog")
-    dialog.setWindowTitle("Discard pending work?")
-    dialog.setIcon(QMessageBox.Icon.Warning)
-    dialog.setTextFormat(Qt.TextFormat.PlainText)
-    dialog.setText(f"Discard pending work and {action}?")
-    replacement = (
-        "Closing the application removes these session choices and undo history."
-        if action == "exit"
-        else "A successful scan replaces the current groups, review choices and undo history."
-    )
-    dialog.setInformativeText(
-        f"{summary.description()}\n\n{replacement}\n"
-        "Choose Cancel to continue reviewing. Completed music-file changes remain saved.",
-    )
-    dialog.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Discard)
-    # Accidental Enter/Escape must preserve the pending session. Discard needs
-    # an explicit choice and never claims to undo completed filesystem changes.
-    dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
-    dialog.setEscapeButton(QMessageBox.StandardButton.Cancel)
-
-    return dialog.exec() == QMessageBox.StandardButton.Discard

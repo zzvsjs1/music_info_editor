@@ -21,6 +21,9 @@ analysis = Analysis(
     datas=[
         (str(project_root / "LICENSE"), "."),
         (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
+        # Keep the desktop scene next to its Python loader in frozen builds.
+        (str(project_root / "src" / "metadata_polisher" / "ui" / "quick" / "qml"),
+         "metadata_polisher/ui/quick/qml"),
     ],
     # RapidFuzz chooses compiled CPU-specific modules dynamically. Its modules
     # must be present even when static analysis cannot follow that selection.
@@ -36,6 +39,26 @@ analysis = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# The dependency scanner can pick up ICU DLLs from an unrelated Poppler
+# installation on PATH. Those copies can prevent the frozen QtCore module from
+# loading. Limit this exclusion to the observed Poppler directory and DLLs so
+# that binaries supplied by PySide6 or another dependency are still collected.
+def is_unrelated_poppler_icu(binary):
+    destination, source, kind = binary
+    source_directory = tuple(part.casefold() for part in Path(source).parent.parts[-3:])
+
+    return (
+        kind == "BINARY"
+        and Path(destination).name.casefold() in {"icuuc.dll", "icudt78.dll"}
+        and source_directory == ("poppler", "library", "bin")
+    )
+
+
+application_binaries = [
+    binary for binary in analysis.binaries if not is_unrelated_poppler_icu(binary)
+]
+
 # Keep the launcher small and collect dependencies into the onedir distribution;
 # users need the complete resulting folder, including its _internal directory.
 archive = PYZ(analysis.pure)
@@ -55,7 +78,7 @@ executable = EXE(
 )
 collection = COLLECT(
     executable,
-    analysis.binaries,
+    application_binaries,
     analysis.datas,
     strip=False,
     upx=False,

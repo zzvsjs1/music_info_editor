@@ -24,6 +24,20 @@ Scanned groups, candidates, review choices, undo history, inclusion choices and 
 
 Rescan, browsing to another folder and exiting now ask before discarding pending decisions. **Cancel** is the default. Failed or cancelled scans retain the current review; a successful replacement scan starts a fresh review and write selection.
 
+## Qt Quick interface
+
+Qt Quick/QML is the application interface. The library window and separate metadata review window use the shared application services for lookup, review, grouping, renaming and Apply:
+
+```powershell
+& .\.venv\Scripts\python.exe -m metadata_polisher
+# Or, from the complete portable build folder:
+.\MetadataPolisher.exe
+```
+
+Choose a folder and select **Rescan**, then choose an album. Select files and open **Metadata review…** to inspect their existing, proposed and final values. Ctrl-click toggles selections; Shift-click extends them. In the review window, select fields and press **F2** to edit, **Escape** to close an editor, or **Ctrl+Z** to undo a review action. In Files, arrow keys move selection, **Space** toggles inclusion, and **Ctrl+A** selects the current album. **Full values** displays complete, copyable metadata for every selected field. Manual editing opens a compact separate window; Track and Disc have independent Number and Total inputs. Enter accepts a position, Ctrl+Enter accepts a text edit, and Escape cancels it. Page Up/Down scroll through rows; Ctrl+Home/End moves to the first/last row, and Shift extends selection. Right-click table headers, including an empty header, to choose visible columns.
+
+Provider lookup, candidate explanations, search terms, track mapping, settings, diagnostics, grouping, filename previews and Apply are available in QML. Candidate and per-file tables support keyboard navigation, resizable columns and copyable details; secondary windows retain their sizes. The QML launcher respects the platform control style and explicit Qt style overrides. Settings uses compact Qt Fusion tabs with previous/next controls when the strip overflows; Ctrl+Tab and Ctrl+Shift+Tab switch tabs from an input. Rows and action layouts adapt to larger fonts. Review decisions remain in memory until **Apply changes** is explicitly selected in the final confirmation. Existing portable settings and window preferences are retained. The old Widgets interface has been removed; existing shortcuts containing `--qml` still launch the same QML application.
+
 ## Review and apply
 
 Manual field editing is available after scanning, even without an online lookup.

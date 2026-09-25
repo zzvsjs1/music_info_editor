@@ -20,9 +20,9 @@ from metadata_polisher.execution.events import OperationEventSink, OperationStag
 from metadata_polisher.execution.executor import SerialBackgroundExecutor
 from metadata_polisher.infrastructure.diagnostics import sanitise_diagnostic_data
 from metadata_polisher.session.state import GroupSelection, SessionState
-from metadata_polisher.ui.main_window import MainWindow
 from metadata_polisher.ui.qt_bridge import QtOperationBridge
-from tests.ui.test_main_window import make_group
+from metadata_polisher.ui.quick.backend import QuickBackend
+from tests.ui.helpers import make_group
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIRST_PARTY_ROOTS = ("src", "tests", "scripts")
@@ -77,20 +77,18 @@ def test_dataclass_creation_replacement_and_diagnostic_field_walk() -> None:
 
 
 def test_populated_qt_model_and_decorated_worker_slots_with_native_annotations(qtbot) -> None:
-    window = MainWindow()
-    qtbot.addWidget(window)
     group = make_group("annotation-group", "annotation-file", "日本語 / Long Latin title")
-    window.set_session_state(
-        SessionState(root=Path("library"), groups=(group,), selection=GroupSelection("annotation-group"))
+    backend = QuickBackend(
+        state=SessionState(root=Path("library"), groups=(group,), selection=GroupSelection("annotation-group")),
     )
 
-    assert window.file_model.data(window.file_model.index(0, 0), Qt.ItemDataRole.UserRole) == "annotation-file"
+    assert backend.files.data(backend.files.index(0, 0), Qt.ItemDataRole.UserRole) == "annotation-file"
 
     ui_thread = get_ident()
     received_threads: list[int] = []
     received_stages: list[OperationStageChanged] = []
     executor = SerialBackgroundExecutor()
-    bridge = QtOperationBridge(executor, window)
+    bridge = QtOperationBridge(executor, backend)
 
     def observe_event(event: object) -> None:
         received_threads.append(get_ident())
@@ -115,3 +113,4 @@ def test_populated_qt_model_and_decorated_worker_slots_with_native_annotations(q
         assert received_threads and all(thread == ui_thread for thread in received_threads)
     finally:
         executor.shutdown()
+        backend.shutdown()

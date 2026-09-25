@@ -5,6 +5,7 @@ recursive-include .github *.yml *.md
 recursive-include packaging *.spec
 recursive-include scripts *.py
 recursive-include src *.py
+recursive-include src/metadata_polisher/ui/quick/qml *.qml
 recursive-include tests *.py *.md
 recursive-include tests/fixtures/providers *.html *.json
 include tests/fixtures/network/loopback-test-cert.pem

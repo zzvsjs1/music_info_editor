@@ -49,6 +49,9 @@ include = ["metadata_polisher*"]
 # Runtime settings are created beside the application, never shipped as data.
 include-package-data = false
 
+[tool.setuptools.package-data]
+"metadata_polisher.ui.quick" = ["qml/*.qml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--strict-markers", "--import-mode=importlib", "-m", "not live and not localmedia"]
