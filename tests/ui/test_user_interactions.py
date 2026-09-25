@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QApplication
 
 from metadata_polisher.domain.metadata import MetadataField
 from tests.ui.test_file_selection_actions import library_session
-from tests.ui.test_review_workflow import review_window
+from tests.ui.test_review_workflow import focus_review_shortcuts, review_window
 from tests.unit.session.test_batch_review import make_batch_session
 
 
@@ -88,9 +88,7 @@ def test_ctrl_z_works_without_highlighted_files(qtbot, tmp_path):
     before = window.diff_model.index(0, 4).data()
     window.clear_value_button.click()
     window.clear_file_selection_button.click()
-    window.review_window.activateWindow()
-    window.diff_table_view.setFocus()
-    qtbot.waitUntil(lambda: window.diff_table_view.hasFocus())
+    focus_review_shortcuts(qtbot, window)
     qtbot.keyClick(window.diff_table_view, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     window.file_table_view.selectRow(0)
     assert window.diff_model.index(0, 4).data() == before
@@ -101,13 +99,15 @@ def test_ctrl_z_works_without_highlighted_files(qtbot, tmp_path):
 def test_ctrl_enter_opens_confirmation_without_writing(qtbot, tmp_path):
     window = review_window(qtbot, tmp_path, make_batch_session())
     window.include_selected_button.click()
-    window.review_window.activateWindow()
-    window.diff_table_view.setFocus()
-    qtbot.waitUntil(lambda: window.diff_table_view.hasFocus())
+    focus_review_shortcuts(qtbot, window)
     opened = []
 
     def cancel():
         dialog = QApplication.activeModalWidget()
+
+        if dialog is None:
+            return
+
         opened.append(dialog.windowTitle())
         dialog.reject()
 

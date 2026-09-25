@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 
 from metadata_polisher.bootstrap import create_application
 from metadata_polisher.session.state import GroupSelection
-from tests.ui.test_review_workflow import review_window
+from tests.ui.test_review_workflow import focus_review_shortcuts, review_window
 from tests.ui.test_scan_workflow import ControlledExecutor
 from tests.unit.session.test_review_editing import make_local_session, make_source
 
@@ -37,9 +37,7 @@ def test_full_value_details_are_read_only_and_follow_field_selection(qtbot, tmp_
 def test_f1_opens_non_modal_help_without_changing_review(qtbot, tmp_path):
     window = review_window(qtbot, tmp_path)
     snapshot = window.session_state
-    window.review_window.activateWindow()
-    window.diff_table_view.setFocus()
-    qtbot.waitUntil(lambda: window.diff_table_view.hasFocus())
+    focus_review_shortcuts(qtbot, window)
     qtbot.keyClick(window.diff_table_view, Qt.Key.Key_F1)
     qtbot.waitUntil(lambda: window.help_dialog is not None and window.help_dialog.isVisible())
 

@@ -23,6 +23,23 @@ def review_window(qtbot, tmp_path, state=None):
     return window
 
 
+def focus_review_shortcuts(qtbot, window):
+    """Give synthetic key events the same active review window as real input."""
+    window.show()
+    window.review_window.open_review()
+    window.diff_table_view.setFocus()
+    QApplication.processEvents()
+
+    # Unattended Windows runners may refuse a foreground activation request.
+    # Supply Qt's active shortcut context only when native activation failed.
+    if QApplication.activeWindow() is not window.review_window:
+        QApplication.setActiveWindow(window.review_window)
+        window.diff_table_view.setFocus()
+
+    qtbot.waitUntil(lambda: QApplication.activeWindow() is window.review_window
+                    and window.diff_table_view.hasFocus())
+
+
 def field_review(window, field):
     return next(review for review in window.session_state.groups[0].reviewed_files[0].reviews if review.field is field)
 
