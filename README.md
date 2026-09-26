@@ -171,10 +171,12 @@ Close the packaged application before rebuilding. Builds use a separate staging 
 The default suite is offline and does not require `musics/`. Run it and the static checks with:
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest -q
+& .\.venv\Scripts\python.exe scripts/test_offscreen.py -q
 & .\.venv\Scripts\python.exe -m ruff check .
 & .\.venv\Scripts\python.exe -m mypy src scripts
 ```
+
+The offscreen runner provides a fixed 1920×1080 virtual desktop, Segoe UI and software rendering so layout checks do not depend on your display size. Native Windows painting and process lifecycle checks run separately in CI. Focus, DPI scaling and packaged application behaviour still need manual Windows checks.
 
 Normal format integration tests generate disposable WAV fixtures. Other formats have native-tag and adapter tests; real container checks use the optional local-media suite. Keep private sample files under the ignored `musics/` directory and run:
 
@@ -198,7 +200,7 @@ Run only the live test for the provider you have selected. These tests make real
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, architecture and review expectations, and [SECURITY.md](SECURITY.md) for private vulnerability reporting guidance. Bug reports should contain minimal reproduction steps and sanitised diagnostics.
 
-The Windows [CI workflow](.github/workflows/ci.yml) runs the offline suite, static checks, Python package builds and release-content checks. It uses Qt's native Windows backend for screen and font layout tests. It does not upload or publish releases.
+The Windows [CI workflow](.github/workflows/ci.yml) runs the offline suite on a fixed virtual desktop, separate native Windows painting and process lifecycle checks, static checks, Python package builds and release-content checks. It does not upload or publish releases.
 
 Build source and wheel archives after installing the development dependencies:
 

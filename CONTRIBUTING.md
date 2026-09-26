@@ -41,10 +41,12 @@ Use synthetic provider responses and generated disposable media in committed tes
 Run the offline suite and static checks from the repository root:
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest -q
+& .\.venv\Scripts\python.exe scripts/test_offscreen.py -q
 & .\.venv\Scripts\python.exe -m ruff check .
 & .\.venv\Scripts\python.exe -m mypy src scripts
 ```
+
+The offscreen runner keeps layout checks independent of the host display size. The [CI workflow](.github/workflows/ci.yml) also runs native Windows painting and process lifecycle checks separately, because offscreen rendering cannot validate native theme textures. Manual Windows checks are still required for focus, DPI scaling and packaged application behaviour.
 
 The default pytest configuration excludes `live` and `localmedia` tests. It must work without a music library, provider credentials or network access. Use fake transports for provider behaviour tests.
 

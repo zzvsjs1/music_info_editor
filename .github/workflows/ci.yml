@@ -16,14 +16,11 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 20
-    env:
-      # Layout regressions use native Windows font metrics and screen geometry.
-      QT_QPA_PLATFORM: windows
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
           cache: pip
@@ -37,7 +34,17 @@ jobs:
       - name: Type check
         run: python -m mypy src scripts
       - name: Offline tests
-        run: python -m pytest -q
+        # Use a fixed desktop size so the runner's display cannot clip test windows.
+        run: python scripts/test_offscreen.py -q
+      - name: Native Windows rendering and lifecycle tests
+        env:
+          QT_QPA_PLATFORM: windows
+        # Native theme painting and process shutdown need the Windows backend.
+        run: >-
+          python -m pytest -q
+          tests/ui/test_quick_presentation_regressions.py::test_native_review_scrollbar_has_no_white_edge
+          tests/ui/test_quick_table_interaction.py::test_native_horizontal_scrollbar_has_a_continuous_track
+          tests/ui/test_quick_process_lifecycle.py
       - name: Build Python source and wheel distributions
         run: python -m build
       - name: Check distribution contents

@@ -13,12 +13,12 @@ from metadata_polisher.session.state import ReviewedFileState, SessionState
 
 
 def apply_manual_track_mapping(
-    state: SessionState,
-    group_id: str,
-    mapping: TrackMappingResult,
-    rename_settings: RenameSettings,
-    *,
-    preferred_language: str = "auto",
+        state: SessionState,
+        group_id: str,
+        mapping: TrackMappingResult,
+        rename_settings: RenameSettings,
+        *,
+        preferred_language: str = "auto",
 ) -> SessionState:
     """Replace the effective mapping and derive proposals, reviews and filenames."""
     if state.active_operation is not None:
@@ -60,8 +60,8 @@ def apply_manual_track_mapping(
                 retain_user_decision(
                     previous[result.file_id][fresh.field], fresh,
                     candidate_dependency_unchanged=(
-                        fresh.field not in track_fields
-                        or previous_tracks.get(result.file_id) == current_tracks.get(result.file_id)
+                            fresh.field not in track_fields
+                            or previous_tracks.get(result.file_id) == current_tracks.get(result.file_id)
                     ),
                 )
                 if fresh.field in previous.get(result.file_id, {}) else fresh
