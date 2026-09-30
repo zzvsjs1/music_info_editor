@@ -7,8 +7,10 @@ from mutagen.apev2 import APEv2
 
 from metadata_polisher.domain.metadata import FieldReadState, MetadataChange, MetadataField, Position
 from metadata_polisher.formats.flac import FlacAdapter
+from metadata_polisher.formats.mp4 import Mp4Adapter
 from metadata_polisher.formats.tak import TakAdapter
 from tests.unit.formats.test_flac import FakeFlacFile
+from tests.unit.formats.test_mp4 import FakeMp4File
 from tests.unit.formats.test_tak import FakeTakFile
 
 
@@ -76,3 +78,61 @@ def test_equivalent_ape_date_aliases_remain_readable_and_explicit_change_uses_ye
     assert adapter.read(tmp_path / "fixture.tak").metadata.date == "2024-02"
     adapter.write_changes(tmp_path / "fixture.tak", (MetadataChange(MetadataField.DATE, "2024-02", "2025"),))
     assert str(tags["Year"]) == "2025" and "Date" not in tags
+
+
+@pytest.mark.parametrize("format_id", ("flac", "tak", "mp4"))
+def test_reading_keeps_each_fields_value_state_and_diagnostic_together(tmp_path, format_id) -> None:
+    # Mixed states in one read expose accidental reuse of another field's
+    # diagnostic. The public snapshot also distinguishes unreadable positions
+    # from genuinely missing ones, even though both have empty domain values.
+    if format_id == "flac":
+        tags = {
+            "TITLE": ["Visible title"],
+            "ARTIST": ["", "Artist One", "Artist Two"],
+            "TRACKNUMBER": ["1/2/3"],
+            "DATE": [9],
+        }
+        adapter = FlacAdapter(loader=lambda _: FakeFlacFile(tags))
+        suffix = ".flac"
+        track_detail = "TRACKNUMBER"
+        date_detail = "non-string"
+    elif format_id == "tak":
+        tags = APEv2()
+        tags["Title"] = "Visible title"
+        tags["Artist"] = ["", "Artist One", "Artist Two"]
+        tags["Track"] = "1/2/3"
+        tags["Year"] = b"\x01\x02"
+        adapter = TakAdapter(loader=lambda _: FakeTakFile(tags))
+        suffix = ".tak"
+        track_detail = "more than one slash"
+        date_detail = "UTF-8 text"
+    else:
+        tags = {
+            "©nam": ["Visible title"],
+            "©ART": ["", "Artist One", "Artist Two"],
+            "trkn": [(1, "bad total")],
+            "©day": [9],
+        }
+        adapter = Mp4Adapter(loader=lambda _: FakeMp4File(tags))
+        suffix = ".m4a"
+        track_detail = "non-integer position"
+        date_detail = "non-string"
+
+    before = deepcopy(dict(tags.items()))
+    result = adapter.read(tmp_path / f"fixture{suffix}")
+
+    assert result.metadata.title == "Visible title"
+    assert result.metadata.artists == ("Artist One", "Artist Two")
+    assert result.field_states[MetadataField.TITLE] is FieldReadState.PRESENT
+    assert result.field_states[MetadataField.ARTISTS] is FieldReadState.PRESENT
+    assert result.metadata.track == result.metadata.disc == Position()
+    assert result.field_states[MetadataField.TRACK] is FieldReadState.UNREADABLE
+    assert result.field_states[MetadataField.DISC] is FieldReadState.MISSING
+    assert result.metadata.date is None
+    assert result.field_states[MetadataField.DATE] is FieldReadState.UNREADABLE
+    assert len(result.issues) == 2
+    track_issue = next(issue for issue in result.issues if "track metadata" in issue.message)
+    date_issue = next(issue for issue in result.issues if "date metadata" in issue.message)
+    assert track_detail in track_issue.technical_detail
+    assert date_detail in date_issue.technical_detail
+    assert dict(tags.items()) == before

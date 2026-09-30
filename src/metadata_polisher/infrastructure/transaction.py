@@ -23,7 +23,7 @@ from metadata_polisher.formats.base import (
     MediaFormatAdapter,
     MediaFormatError,
 )
-from metadata_polisher.infrastructure.filesystem import FileSystem, LocalFileSystem
+from metadata_polisher.infrastructure.filesystem import FileSystem, LocalFileSystem, read_file_version
 
 
 @dataclass(frozen=True)
@@ -138,9 +138,12 @@ class TransactionalFileWriter:
             if not changes.metadata_changes and changes.rename_change is None:
                 return self._succeeded(events, operation_id, source, source.path)
 
+            self._check_source_version(source)
+
             if backup.enabled:
                 stage = FileTransactionStage.BACKING_UP
                 self._emit_stage(events, operation_id, source, stage)
+                self._check_source_version(source)
                 backup_result = self._back_up(source.path, backup)
 
                 if isinstance(backup_result, Issue):
@@ -153,6 +156,7 @@ class TransactionalFileWriter:
 
             stage = FileTransactionStage.COPYING_TEMPORARY
             self._emit_stage(events, operation_id, source, stage)
+            self._check_source_version(source)
 
             try:
                 temporary_path = self._filesystem.create_temporary_sibling(source.path)
@@ -170,6 +174,9 @@ class TransactionalFileWriter:
 
                 return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
 
+            # A concurrent edit during copying also invalidates the reviewed
+            # baseline, even if the private copy itself can still be verified.
+            self._check_source_version(source)
             cancellation.raise_if_cancelled()
 
             # A rename-only transaction still copies and verifies the media,
@@ -214,6 +221,7 @@ class TransactionalFileWriter:
             if changes.rename_change is None:
                 stage = FileTransactionStage.COMMITTING
                 self._emit_stage(events, operation_id, source, stage)
+                self._check_source_version(source)
 
                 try:
                     self._filesystem.replace_file(temporary_path, source.path)
@@ -237,6 +245,7 @@ class TransactionalFileWriter:
             destination = changes.rename_change.new_path
             stage = FileTransactionStage.RENAMING
             self._emit_stage(events, operation_id, source, stage)
+            self._check_source_version(source)
 
             try:
                 # Publish without replacement while retaining the original. A
@@ -289,6 +298,7 @@ class TransactionalFileWriter:
 
             stage = FileTransactionStage.CLEANING_ORIGINAL
             self._emit_stage(events, operation_id, source, stage)
+            self._check_source_version(source)
 
             # Delete the original only after the renamed output verifies. If
             # cleanup fails, retain both files and report that exact partial state.
@@ -312,6 +322,16 @@ class TransactionalFileWriter:
                 )
 
             return self._succeeded(events, operation_id, source, destination, completed_backup_path)
+        except MediaFormatError as error:
+            # A source conflict never grants permission to overwrite or delete
+            # the external edit. A published rename may also have been changed
+            # externally, so retain that path for recovery and require a rescan.
+            cleanup_issues = self._remove_if_present(temporary_path)
+
+            return self._failed(
+                events, operation_id, source, final_path, stage,
+                (error.issue, *cleanup_issues), completed_backup_path,
+            )
         # Every cancellation check above occurs before publication. At those
         # points only the temporary sibling needs removal; the source is intact.
         except OperationCancelledError:
@@ -347,6 +367,30 @@ class TransactionalFileWriter:
             )
 
             return result
+
+    @staticmethod
+    def _check_source_version(source: LocalMediaFile) -> None:
+        # Synthetic callers can omit a version; every real scan supplies one.
+        # Compare identity as well as timestamps to catch replaced source files.
+        if source.file_version is None:
+            return
+
+        detail = None
+
+        try:
+            if read_file_version(source.path) == source.file_version:
+                return
+        except OSError as error:
+            detail = f"{type(error).__name__}: {error}"
+
+        raise MediaFormatError(
+            path=source.path,
+            issue=Issue(
+                MediaErrorCode.SOURCE_CHANGED,
+                "The source file changed since scanning. Rescan and review it again.",
+                technical_detail=detail,
+            ),
+        )
 
     def _validate_request(
         self,

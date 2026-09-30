@@ -32,6 +32,7 @@ from metadata_polisher.session.review_editing import (
     BatchReviewCommand,
     aggregate_review_fields,
     apply_batch_review,
+    review_undo_targets,
     undo_last_review_action,
 )
 from metadata_polisher.session.state import (
@@ -430,3 +431,39 @@ def test_undo_never_restores_a_stale_file_snapshot():
 
     assert undone.groups[0].requires_rescan
     assert undone.groups[0].reviewed_files == ()
+    assert undone.review_undo == ()
+
+
+@pytest.mark.parametrize("newer_stale_action", (False, True))
+def test_undo_keeps_usable_batch_members_when_another_group_requires_rescan(newer_stale_action):
+    state = make_batch_session()
+    other_source = make_source("other.flac")
+    other = make_local_session(other_source).groups[0]
+    other = replace(other, group=replace(other.group, group_id="other"))
+    state = replace(state, groups=(*state.groups, other))
+    command = BatchReviewCommand(
+        file_ids=selected_ids(state), fields=(MetadataField.TITLE,), expected_revision=state.revision,
+        action=BatchReviewAction.SET_COMMON_VALUE, common_value="Reviewed batch title",
+    )
+    changed = apply_batch_review(state, command, RenameSettings()).state
+
+    if newer_stale_action:
+        # A wholly stale newest action must not conceal an older batch whose
+        # other group still has exactly the source and decisions it captured.
+        command = replace(
+            command, file_ids=(selected_ids(state)[0],), expected_revision=changed.revision,
+            common_value="Newer decision in the stale group",
+        )
+        changed = apply_batch_review(changed, command, RenameSettings()).state
+
+    invalidated = mark_groups_requires_rescan(changed, ("album",))
+    stale_group = invalidated.groups[0]
+    targets = review_undo_targets(invalidated)
+    assert tuple(item.source.file_id for item in targets) == (other_source.file_id,)
+
+    undone = undo_last_review_action(invalidated, RenameSettings())
+    assert undone.groups[0] is stale_group
+    assert final_title(undone, other_source.file_id) == other_source.read_result.metadata.title
+    assert undone.review_undo == ()
+    assert review_undo_targets(undone) == ()
+    assert undone.library_revision == invalidated.library_revision

@@ -1060,9 +1060,9 @@ class QuickBackend(QObject):
         ):
             return
 
-        self._included = self._included | {file_id} if included else self._included - {file_id}
-        self._files.set_included_file_ids(self._included)
-        self.changed.emit()
+        # The Included review scope follows the write batch. Reuse its central
+        # update path so checkbox and keyboard commands also refresh the table.
+        self.set_included_file_ids(self._included | {file_id} if included else self._included - {file_id})
 
     @Slot()
     def toggleSelectedIncluded(self) -> None:

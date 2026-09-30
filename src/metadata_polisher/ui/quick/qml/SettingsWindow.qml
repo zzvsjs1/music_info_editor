@@ -11,7 +11,7 @@ ApplicationWindow {
     title: "Settings"
     width: Math.min(760, Screen.width - 32)
     height: Math.min(490, Screen.height - 64)
-    minimumWidth: 600
+    minimumWidth: 420
     minimumHeight: 360
     visible: settings.opened
     modality: Qt.WindowModal
@@ -23,17 +23,90 @@ ApplicationWindow {
     readonly property real networkLabelWidth: Math.max(networkRouteLabel.implicitWidth,
         networkHostLabel.implicitWidth, networkUsernameLabel.implicitWidth,
         networkPasswordLabel.implicitWidth)
+    readonly property bool narrowForm: width < Math.max(600,
+        networkLabelWidth + 28 * formFontMetrics.averageCharacterWidth
+        + 2 * metrics.windowMargin + metrics.spacingLarge)
 
     UiMetrics {
         id: metrics
     }
 
+    FontMetrics {
+        id: formFontMetrics
+        font: root.font
+    }
+
     // All form rows share one rhythm. The controls retain their native Qt
     // appearance while the shared components supply readable text insets.
     component SettingsFormGrid: GridLayout {
-        columns: 2
-        rowSpacing: metrics.formRowSpacing
+        columns: root.narrowForm ? 1 : 2
+        rowSpacing: root.narrowForm ? metrics.spacingSmall : metrics.formRowSpacing
         columnSpacing: metrics.spacingLarge
+    }
+
+    component SettingsFieldLabel: Label {
+        Layout.fillWidth: root.narrowForm
+        Layout.maximumWidth: root.narrowForm ? parent.width : Number.POSITIVE_INFINITY
+        wrapMode: Text.WordWrap
+    }
+
+    // Numeric/select controls keep their native editing behaviour. This shared
+    // field message gives them the same bounded diagnostic as text inputs.
+    component SettingsFieldError: AppScrollView {
+        id: fieldError
+
+        property string field: ""
+        readonly property string message: settings.fieldErrors[field] || ""
+        visible: message.length > 0
+        Layout.fillWidth: true
+        Layout.minimumWidth: 0
+        Layout.preferredHeight: Math.min(48, messageText.implicitHeight)
+        Layout.maximumHeight: 48
+        contentWidth: availableWidth
+        padding: 0
+        background: null
+        clip: true
+
+        TextArea {
+            id: messageText
+            text: fieldError.message
+            color: root.palette.window.hslLightness < 0.5 ? "#ff8078" : "#c32f25"
+            readOnly: true
+            selectByMouse: true
+            wrapMode: TextEdit.WrapAnywhere
+            textFormat: TextEdit.PlainText
+            padding: 0
+            background: null
+        }
+    }
+
+    component SettingsNumberField: ColumnLayout {
+        id: numberField
+
+        property string field: ""
+        property alias inputControl: numberInput
+        property alias inputObjectName: numberInput.objectName
+        property alias value: numberInput.value
+        property alias from: numberInput.from
+        property alias to: numberInput.to
+        property string accessibleLabel: ""
+        Layout.minimumWidth: 0
+        spacing: metrics.spacingSmall
+
+        AppSpinBox {
+            id: numberInput
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            editable: true
+            Accessible.name: numberField.accessibleLabel
+            onValueModified: settings.setField(numberField.field, value)
+            onActiveFocusChanged: {
+                if (!activeFocus && root.visible)
+                    settings.validateField(numberField.field)
+            }
+        }
+
+        SettingsFieldError { field: numberField.field }
     }
 
     // Qt Quick's Windows style does not supply a TabButton. Keep the tab
@@ -123,6 +196,40 @@ ApplicationWindow {
         }
 
         return -1
+    }
+
+    function saveSettings() {
+        if (settings.save())
+            return
+
+        // A failed submission reveals the first invalid field across tabs.
+        // Wait for the page switch and layout polish before scrolling/focusing.
+        const fields = [
+            ["template", 0, templateEdit, renameScroll],
+            ["trackDigits", 0, trackDigits.inputControl, renameScroll],
+            ["discDigits", 0, discDigits.inputControl, renameScroll],
+            ["preferredLanguage", 1, languageEdit.inputControl, providerScroll],
+            ["networkMode", 2, routeEdit, networkScroll],
+            ["proxyHost", 2, proxyHostEdit.inputControl, networkScroll],
+            ["proxyPort", 2, proxyPortEdit.inputControl, networkScroll],
+            ["backupDirectory", 3, backupEdit.inputControl, outputScroll]
+        ]
+
+        for (const field of fields) {
+            if (!(settings.fieldErrors[field[0]] || ""))
+                continue
+
+            tabs.currentIndex = field[1]
+            Qt.callLater(function() {
+                const control = field[2]
+                const viewport = field[3].contentItem
+                const top = control.mapToItem(viewport.contentItem, 0, 0).y
+                viewport.contentY = Math.max(0, Math.min(top,
+                    viewport.contentHeight - viewport.height))
+                control.forceActiveFocus()
+            })
+            return
+        }
     }
 
     FolderDialog {
@@ -256,119 +363,134 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         enabled: !settings.testRunning
 
-                        Label {
+                        SettingsFieldLabel {
                             text: "Filename template"
                         }
 
-                        AppTextField {
-                            id: templateEdit
-                            objectName: "settingsTemplate"
+                        ValidatedTextField {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
-                            text: settings.draft.template
-                            selectByMouse: true
-                            property var completion: ({})
+                            errorText: settings.fieldErrors.template || ""
 
-                            function refreshCompletions() {
-                                completion = selectionStart === selectionEnd
-                                    ? settings.templateCompletion(text, cursorPosition) : ({})
+                            editor: AppTextField {
+                                id: templateEdit
+                                objectName: "settingsTemplate"
+                                anchors.fill: parent
+                                text: settings.draft.template
+                                selectByMouse: true
+                                property var completion: ({})
 
-                                if (completion.options && completion.options.length) {
-                                    suggestionList.currentIndex = 0
-                                    suggestions.open()
-                                } else {
-                                    suggestions.close()
-                                }
-                            }
+                                function refreshCompletions() {
+                                    completion = selectionStart === selectionEnd
+                                        ? settings.templateCompletion(text, cursorPosition) : ({})
 
-                            function acceptCompletion(token) {
-                                const start = completion.start
-                                const end = completion.end
-                                suggestions.close()
-                                remove(start, end)
-                                insert(start, token)
-                                cursorPosition = start + token.length
-                                settings.setField("template", text)
-                            }
-
-                            onTextEdited: {
-                                settings.setField("template", text)
-                                refreshCompletions()
-                            }
-
-                            onCursorPositionChanged: {
-                                if (suggestions.opened)
-                                    refreshCompletions()
-                            }
-
-                            Keys.onPressed: function(event) {
-                                if (event.key === Qt.Key_Space && event.modifiers === Qt.ControlModifier) {
-                                    refreshCompletions()
-                                    event.accepted = true
-                                } else if (suggestions.opened) {
-                                    if (event.key === Qt.Key_Escape) {
+                                    if (completion.options && completion.options.length) {
+                                        suggestionList.currentIndex = 0
+                                        suggestions.open()
+                                    } else {
                                         suggestions.close()
-                                        event.accepted = true
-                                    } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
-                                        const step = event.key === Qt.Key_Down ? 1 : -1
-                                        suggestionList.currentIndex = (suggestionList.currentIndex + step
-                                            + suggestionList.count) % suggestionList.count
-                                        event.accepted = true
-                                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
-                                               || event.key === Qt.Key_Tab) {
-                                        acceptCompletion(completion.options[suggestionList.currentIndex])
-                                        event.accepted = true
                                     }
                                 }
-                            }
 
-                            Popup {
-                                id: suggestions
-                                objectName: "templateSuggestions"
-                                y: templateEdit.height
-                                width: Math.min(280, templateEdit.width)
-                                height: Math.min(220, suggestionList.contentHeight + 12)
-                                padding: 6
-                                focus: false
-                                closePolicy: Popup.CloseOnPressOutside
+                                function acceptCompletion(token) {
+                                    const start = completion.start
+                                    const end = completion.end
+                                    suggestions.close()
+                                    remove(start, end)
+                                    insert(start, token)
+                                    cursorPosition = start + token.length
+                                    settings.setField("template", text)
+                                }
 
-                                ListView {
-                                    id: suggestionList
-                                    anchors.fill: parent
-                                    clip: true
-                                    model: templateEdit.completion.options || []
-                                    delegate: ItemDelegate {
-                                        required property int index
-                                        required property string modelData
-                                        width: ListView.view.width
-                                        text: modelData
-                                        highlighted: ListView.isCurrentItem
-                                        onClicked: templateEdit.acceptCompletion(modelData)
+                                onTextEdited: {
+                                    settings.setField("template", text)
+                                    refreshCompletions()
+                                }
+
+                                onEditingFinished: settings.validateField("template")
+                                Accessible.name: "Filename template"
+                                Accessible.description: settings.fieldErrors.template || ""
+
+                                onCursorPositionChanged: {
+                                    if (suggestions.opened)
+                                        refreshCompletions()
+                                }
+
+                                Keys.onPressed: function(event) {
+                                    if (event.key === Qt.Key_Space && event.modifiers === Qt.ControlModifier) {
+                                        refreshCompletions()
+                                        event.accepted = true
+                                    } else if (suggestions.opened) {
+                                        if (event.key === Qt.Key_Escape) {
+                                            suggestions.close()
+                                            event.accepted = true
+                                        } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
+                                            const step = event.key === Qt.Key_Down ? 1 : -1
+                                            suggestionList.currentIndex = (suggestionList.currentIndex + step
+                                                + suggestionList.count) % suggestionList.count
+                                            event.accepted = true
+                                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                                                   || event.key === Qt.Key_Tab) {
+                                            acceptCompletion(completion.options[suggestionList.currentIndex])
+                                            event.accepted = true
+                                        }
+                                    }
+                                }
+
+                                Popup {
+                                    id: suggestions
+                                    objectName: "templateSuggestions"
+                                    y: templateEdit.height
+                                    width: Math.min(280, templateEdit.width)
+                                    height: Math.min(220, suggestionList.contentHeight + 12)
+                                    padding: 6
+                                    focus: false
+                                    closePolicy: Popup.CloseOnPressOutside
+
+                                    ListView {
+                                        id: suggestionList
+                                        anchors.fill: parent
+                                        clip: true
+                                        model: templateEdit.completion.options || []
+                                        delegate: ItemDelegate {
+                                            required property int index
+                                            required property string modelData
+                                            width: ListView.view.width
+                                            text: modelData
+                                            highlighted: ListView.isCurrentItem
+                                            onClicked: templateEdit.acceptCompletion(modelData)
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        Label {
+                        SettingsFieldLabel {
                             text: "Minimum track digits"
                         }
 
-                        AppSpinBox {
+                        SettingsNumberField {
+                            id: trackDigits
                             Layout.fillWidth: true
-                            from: 1; to: 10; editable: true
+                            field: "trackDigits"
+                            inputObjectName: "settingsTrackDigits"
+                            accessibleLabel: "Minimum track digits"
+                            from: 1; to: 10
                             value: settings.draft.trackDigits
-                            onValueModified: settings.setField("trackDigits", value)
                         }
 
-                        Label {
+                        SettingsFieldLabel {
                             text: "Minimum disc digits"
                         }
 
-                        AppSpinBox {
+                        SettingsNumberField {
+                            id: discDigits
                             Layout.fillWidth: true
-                            from: 1; to: 10; editable: true
+                            field: "discDigits"
+                            inputObjectName: "settingsDiscDigits"
+                            accessibleLabel: "Minimum disc digits"
+                            from: 1; to: 10
                             value: settings.draft.discDigits
-                            onValueModified: settings.setField("discDigits", value)
                         }
                     }
 
@@ -397,20 +519,25 @@ ApplicationWindow {
                     SettingsFormGrid {
                         Layout.fillWidth: true
 
-                        Label {
+                        SettingsFieldLabel {
                             text: "Preferred language (auto, ja, en…)"
                         }
 
-                        AppTextField {
+                        ValidatedTextField {
+                            id: languageEdit
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
+                            inputObjectName: "settingsPreferredLanguage"
+                            accessibleLabel: "Preferred language"
                             text: settings.draft.preferredLanguage
+                            errorText: settings.fieldErrors.preferredLanguage || ""
                             enabled: !settings.testRunning
                             selectByMouse: true
-                            onTextEdited: settings.setField("preferredLanguage", text)
+                            onEdited: settings.setField("preferredLanguage", text)
+                            onFinishedEditing: settings.validateField("preferredLanguage")
                         }
 
-                        Label {
+                        SettingsFieldLabel {
                             text: "Lookup provider"
                         }
 
@@ -496,59 +623,72 @@ ApplicationWindow {
                 ColumnLayout {
                     width: networkScroll.availableWidth
                     spacing: metrics.formRowSpacing
-                    property bool manual: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
 
                     SettingsFormGrid {
                         Layout.fillWidth: true
 
-                        Label {
+                        SettingsFieldLabel {
                             id: networkRouteLabel
-                            Layout.preferredWidth: root.networkLabelWidth
+                            Layout.preferredWidth: root.narrowForm ? -1 : root.networkLabelWidth
                             text: "External services route"
                         }
 
-                        AppComboBox {
-                            objectName: "settingsNetworkRoute"
+                        ColumnLayout {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
-                            model: settings.routeOptions
-                            textRole: "label"
-                            currentIndex: root.optionIndex(settings.routeOptions, settings.draft.networkMode)
-                            enabled: !settings.testRunning
-                            Accessible.name: "External services route"
-                            onActivated: function(index) {
-                                settings.setField("networkMode", settings.routeOptions[index].id)
+                            spacing: metrics.spacingSmall
+
+                            AppComboBox {
+                                id: routeEdit
+                                objectName: "settingsNetworkRoute"
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                model: settings.routeOptions
+                                textRole: "label"
+                                currentIndex: root.optionIndex(settings.routeOptions, settings.draft.networkMode)
+                                enabled: !settings.testRunning
+                                Accessible.name: "External services route"
+                                onActivated: function(index) {
+                                    settings.setField("networkMode", settings.routeOptions[index].id)
+                                }
                             }
+
+                            SettingsFieldError { field: "networkMode" }
                         }
 
-                        Label {
+                        SettingsFieldLabel {
                             id: networkHostLabel
                             text: "HTTP proxy host"
                         }
 
-                        AppTextField {
-                            objectName: "settingsProxyHost"
+                        ValidatedTextField {
+                            id: proxyHostEdit
+                            inputObjectName: "settingsProxyHost"
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             text: settings.draft.proxyHost
+                            errorText: settings.fieldErrors.proxyHost || ""
                             enabled: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
                             placeholderText: "Hostname or IP address, without http://"
                             selectByMouse: true
-                            Accessible.name: "HTTP proxy host"
-                            onTextEdited: settings.setField("proxyHost", text)
+                            accessibleLabel: "HTTP proxy host"
+                            onEdited: settings.setField("proxyHost", text)
+                            onFinishedEditing: settings.validateField("proxyHost")
                         }
 
-                        Label {
+                        SettingsFieldLabel {
                             text: "Port"
                         }
 
-                        AppSpinBox {
-                            objectName: "settingsProxyPort"
-                            from: 0; to: 2147483647; editable: true
+                        SettingsNumberField {
+                            id: proxyPortEdit
+                            Layout.fillWidth: true
+                            field: "proxyPort"
+                            inputObjectName: "settingsProxyPort"
+                            from: 0; to: 2147483647
                             value: settings.draft.proxyPort
                             enabled: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
-                            Accessible.name: "Port"
-                            onValueModified: settings.setField("proxyPort", value)
+                            accessibleLabel: "Port"
                         }
                     }
 
@@ -563,9 +703,9 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         enabled: settings.draft.networkMode === "manual_proxy" && !settings.testRunning
 
-                        Label {
+                        SettingsFieldLabel {
                             id: networkUsernameLabel
-                            Layout.preferredWidth: root.networkLabelWidth
+                            Layout.preferredWidth: root.narrowForm ? -1 : root.networkLabelWidth
                             text: "Session proxy username"
                         }
 
@@ -580,7 +720,7 @@ ApplicationWindow {
                             onTextEdited: settings.setCredentials(text, passwordEdit.text)
                         }
 
-                        Label {
+                        SettingsFieldLabel {
                             id: networkPasswordLabel
                             text: "Session proxy password"
                         }
@@ -658,12 +798,17 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         spacing: metrics.controlSpacing
 
-                        AppTextField {
+                        ValidatedTextField {
+                            id: backupEdit
+                            inputObjectName: "settingsBackupDirectory"
+                            accessibleLabel: "Backup directory"
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             text: settings.draft.backupDirectory
+                            errorText: settings.fieldErrors.backupDirectory || ""
                             selectByMouse: true
-                            onTextEdited: settings.setField("backupDirectory", text)
+                            onEdited: settings.setField("backupDirectory", text)
+                            onFinishedEditing: settings.validateField("backupDirectory")
                         }
 
                         ActionButton {
@@ -832,13 +977,14 @@ ApplicationWindow {
                         }
                     }
 
-                    AppTextField {
+                    ValidatedTextField {
                         id: toolName
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                         placeholderText: "Tool name"
                         selectByMouse: true
-                        Accessible.name: "Tool name"
+                        accessibleLabel: "Tool name"
+                        errorText: settings.fieldErrors.toolName || ""
                     }
 
                     Flow {
@@ -916,7 +1062,7 @@ ApplicationWindow {
                 objectName: "saveSettingsButton"
                 text: "Save"
                 enabled: !settings.testRunning
-                onClicked: settings.save()
+                onClicked: root.saveSettings()
             }
 
             ActionButton {

@@ -180,7 +180,9 @@ class QuickLibrary(QObject):
             if not 0 <= number <= 9999:
                 raise ValueError("Choose a disc number between 1 and 9999, or Auto (0).")
 
-            updated = set_disc_override(self._disc_snapshot, group.group.group_id, number or None)
+            updated = set_disc_override(
+                self._disc_snapshot, group.group.group_id, number or None, host.app_settings.rename,
+            )
         except ValueError as error:
             self._disc_error = str(error)
             self.changed.emit()

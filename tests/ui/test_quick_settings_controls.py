@@ -53,7 +53,17 @@ def _label_and_control(window, text):
     label = next(item for item in window.findChildren(QQuickItem)
                  if item.inherits("QQuickLabel") and item.property("text") == text)
     siblings = label.parentItem().childItems()
-    return label, siblings[siblings.index(label) + 1]
+    field = siblings[siblings.index(label) + 1]
+
+    if _is_form_control(field):
+        return label, field
+
+    # QML aliases can expose a generated control type that has no registered
+    # Python converter. Traverse actual items instead, measuring the visible
+    # native editor while ignoring a specialised field's hidden default input.
+    control = next(item for item in field.findChildren(QQuickItem)
+                   if item.isVisible() and _is_form_control(item))
+    return label, control
 
 
 def _inside(window, item):
@@ -159,6 +169,54 @@ def test_small_large_font_settings_keeps_footer_outside_scrollable_forms(setting
             button = _item(window, name)
             _inside(window, button)
             assert button.mapToScene(QPointF()).y() - page_bottom >= 8
+
+
+def test_narrow_settings_stacks_labels_above_controls_and_keeps_actions_reachable(settings_controls_scene, qtbot):
+    window, _host, _facade = settings_controls_scene
+    window.setProperty("font", QFont("Segoe UI", 14))
+    window.resize(420, 360)
+    _item(window, "settingsTabs").setProperty("currentIndex", 2)
+    qtbot.wait(80)
+    assert window.width() == 420
+
+    for text in ("External services route", "HTTP proxy host", "Port",
+                 "Session proxy username", "Session proxy password"):
+        label, control = _label_and_control(window, text)
+        label_bottom = label.mapToScene(QPointF(0, label.height())).y()
+        assert control.mapToScene(QPointF()).y() >= label_bottom + 3, text
+        left = control.mapToScene(QPointF()).x()
+        assert left >= 0
+        assert left + control.width() <= window.width(), text
+
+    for name in ("saveSettingsButton", "cancelSettingsButton"):
+        _inside(window, _item(window, name))
+
+
+def test_settings_field_errors_are_inline_and_save_focuses_the_first_error(settings_controls_scene, qtbot):
+    from tests.ui.test_quick_window import click_item
+
+    window, _host, facade = settings_controls_scene
+    facade.setField("template", "%unknown%")
+    facade.setField("backupEnabled", True)
+    facade.setField("networkMode", "manual_proxy")
+    facade.setField("proxyHost", "http://invalid-host")
+    _item(window, "settingsTabs").setProperty("currentIndex", 2)
+    window.requestActivate()
+    qtbot.waitUntil(window.isActive)
+    click_item(window, "saveSettingsButton")
+    qtbot.waitUntil(lambda: _item(window, "settingsTabs").property("currentIndex") == 0)
+    qtbot.waitUntil(lambda: _item(window, "settingsTemplate").hasActiveFocus())
+
+    for name, field in (("settingsTemplate", "template"),
+                        ("settingsProxyHost", "proxyHost"),
+                        ("settingsBackupDirectory", "backupDirectory")):
+        message = _item(window, name + "Error")
+        assert message.property("text") == facade.fieldErrors[field]
+        assert message.property("readOnly")
+        assert message.property("selectByMouse")
+
+    assert facade.opened
+    assert facade.error == ""
 
 
 def test_network_keyboard_edits_keep_disabled_fields_and_draft_credentials(settings_controls_scene, qtbot):

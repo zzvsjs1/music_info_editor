@@ -16,7 +16,8 @@ from metadata_polisher.domain.metadata import (
     MetadataSnapshot,
     Position,
 )
-from metadata_polisher.formats.base import MediaFormatError, VerificationResult
+from metadata_polisher.formats.base import MediaFormatError, TagReadResult, VerificationResult
+from metadata_polisher.formats.id3_policy import read_id3v1_tail
 
 
 class _TakInfo(Protocol):
@@ -87,59 +88,59 @@ def _find_value(
 def _read_text_values(
     tags: Mapping[str, object] | None,
     keys: Sequence[str],
-) -> tuple[tuple[str, ...], FieldReadState, str | None]:
+) -> TagReadResult[tuple[str, ...]]:
     present, raw_value = _find_value(tags, keys)
 
     if not present:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
     if isinstance(raw_value, Exception):
-        return (), FieldReadState.UNREADABLE, str(raw_value)
+        return TagReadResult((), FieldReadState.UNREADABLE, str(raw_value))
 
     # An APE item may be binary or external data even under a familiar name.
     # Keep that state unreadable instead of decoding arbitrary bytes as text.
     if not isinstance(raw_value, APETextValue):
-        return (), FieldReadState.UNREADABLE, "APEv2 value was not UTF-8 text"
+        return TagReadResult((), FieldReadState.UNREADABLE, "APEv2 value was not UTF-8 text")
 
     try:
         values = tuple(raw_value)
     except Exception as error:
-        return (), FieldReadState.UNREADABLE, str(error)
+        return TagReadResult((), FieldReadState.UNREADABLE, str(error))
 
     if any(not isinstance(value, str) for value in values):
-        return (), FieldReadState.UNREADABLE, "APEv2 text contained a non-string item"
+        return TagReadResult((), FieldReadState.UNREADABLE, "APEv2 text contained a non-string item")
 
     values = tuple(value for value in values if value != "")
 
     if not values:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
-    return values, FieldReadState.PRESENT, None
+    return TagReadResult(values, FieldReadState.PRESENT)
 
 
 def _read_single_value(
     tags: Mapping[str, object] | None,
     keys: Sequence[str],
-) -> tuple[str | None, FieldReadState, str | None]:
+) -> TagReadResult[str | None]:
     values: list[str] = []
 
     for key in keys:
-        alias_values, state, detail = _read_text_values(tags, (key,))
+        alias_read = _read_text_values(tags, (key,))
 
-        if state is FieldReadState.UNREADABLE:
-            return None, state, detail
+        if alias_read.read_state is FieldReadState.UNREADABLE:
+            return TagReadResult(None, alias_read.read_state, alias_read.detail)
 
-        values.extend(alias_values)
+        values.extend(alias_read.value)
 
     # Compare the canonical key and all read aliases together. Choosing the
     # first dictionary entry would silently hide contradictory Year/Date tags.
     if len(set(values)) > 1:
-        return None, FieldReadState.UNREADABLE, f"Conflicting values for {'/'.join(keys)}"
+        return TagReadResult(None, FieldReadState.UNREADABLE, f"Conflicting values for {'/'.join(keys)}")
 
     if not values:
-        return None, FieldReadState.MISSING, None
+        return TagReadResult(None, FieldReadState.MISSING)
 
-    return values[0], FieldReadState.PRESENT, None
+    return TagReadResult(values[0], FieldReadState.PRESENT)
 
 
 def _parse_position(value: str) -> Position:
@@ -160,19 +161,19 @@ def _parse_position(value: str) -> Position:
 def _read_position(
     tags: Mapping[str, object] | None,
     keys: Sequence[str],
-) -> tuple[Position, FieldReadState, str | None]:
-    values, state, detail = _read_text_values(tags, keys)
+) -> TagReadResult[Position]:
+    text_read = _read_text_values(tags, keys)
 
-    if state is not FieldReadState.PRESENT:
-        return Position(), state, detail
+    if text_read.read_state is not FieldReadState.PRESENT:
+        return TagReadResult(Position(), text_read.read_state, text_read.detail)
 
-    if len(values) != 1:
-        return Position(), FieldReadState.UNREADABLE, "APEv2 position contained multiple values"
+    if len(text_read.value) != 1:
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, "APEv2 position contained multiple values")
 
     try:
-        return _parse_position(values[0]), FieldReadState.PRESENT, None
+        return TagReadResult(_parse_position(text_read.value[0]), FieldReadState.PRESENT)
     except (TypeError, ValueError) as error:
-        return Position(), FieldReadState.UNREADABLE, str(error)
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, str(error))
 
 
 def _read_issue(field: MetadataField, detail: str | None) -> Issue:
@@ -188,6 +189,24 @@ def _validate_utf8(values: tuple[str, ...]) -> None:
         # APETextValue delays UTF-8 encoding until save(). Validate before loading
         # the target so an encoding failure cannot leave partial in-memory edits.
         value.encode("utf-8")
+
+
+def _validate_legacy_tail(path: Path) -> None:
+    """Block unmanaged legacy tails before APEv2 saving can truncate them."""
+    if read_id3v1_tail(path) is not None:
+        raise ValueError("Preserving unmanaged ID3v1/Lyrics3 tails during APEv2 editing is unsupported.")
+
+    if not path.is_file() or path.stat().st_size < 9:
+        return
+
+    with path.open("rb") as source:
+        source.seek(-9, 2)
+        marker = source.read(9)
+
+    # Lyrics3v1 and v2 use different closing markers. Refuse either physical
+    # trailer without interpreting its lyrics or silently moving/deleting it.
+    if marker in {b"LYRICSEND", b"LYRICS200"}:
+        raise ValueError("Preserving unmanaged Lyrics3 tails during APEv2 editing is unsupported.")
 
 
 def _format_position(value: Position) -> str | object:
@@ -296,31 +315,31 @@ class TakAdapter:
         multi_values: dict[MetadataField, tuple[str, ...]] = {}
 
         for field, keys in _SINGLE_KEYS.items():
-            single_value, state, detail = _read_single_value(tags, keys)
-            single_values[field] = single_value
-            states[field] = state
+            single_read = _read_single_value(tags, keys)
+            single_values[field] = single_read.value
+            states[field] = single_read.read_state
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            if single_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, single_read.detail))
 
         for field, keys in _MULTI_KEYS.items():
-            multi_value, state, detail = _read_text_values(tags, keys)
-            multi_values[field] = multi_value
-            states[field] = state
+            multi_read = _read_text_values(tags, keys)
+            multi_values[field] = multi_read.value
+            states[field] = multi_read.read_state
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            if multi_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, multi_read.detail))
 
-        track, track_state, track_detail = _read_position(tags, _POSITION_KEYS[MetadataField.TRACK])
-        disc, disc_state, disc_detail = _read_position(tags, _POSITION_KEYS[MetadataField.DISC])
-        states[MetadataField.TRACK] = track_state
-        states[MetadataField.DISC] = disc_state
+        track_read = _read_position(tags, _POSITION_KEYS[MetadataField.TRACK])
+        disc_read = _read_position(tags, _POSITION_KEYS[MetadataField.DISC])
+        states[MetadataField.TRACK] = track_read.read_state
+        states[MetadataField.DISC] = disc_read.read_state
 
-        if track_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.TRACK, track_detail))
+        if track_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.TRACK, track_read.detail))
 
-        if disc_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.DISC, disc_detail))
+        if disc_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.DISC, disc_read.detail))
 
         return MediaReadResult(
             metadata=MetadataSnapshot(
@@ -329,8 +348,8 @@ class TakAdapter:
                 album=single_values[MetadataField.ALBUM],
                 album_artists=multi_values[MetadataField.ALBUM_ARTISTS],
                 composers=multi_values[MetadataField.COMPOSERS],
-                track=track,
-                disc=disc,
+                track=track_read.value,
+                disc=disc_read.value,
                 date=single_values[MetadataField.DATE],
                 genres=multi_values[MetadataField.GENRES],
             ),
@@ -347,6 +366,19 @@ class TakAdapter:
         # already absent value must not create an otherwise unnecessary tag block.
         encoded_changes = tuple(_encode_change(change) for change in changes)
         needs_tag_block = any(value is not _DELETE_TAG for _, _, value in encoded_changes)
+
+        # Mutagen's APEv2 save truncates existing trailing ID3v1/Lyrics3 blocks.
+        # Until exact preservation is supported, reject the edit before loading
+        # or changing tags; the transaction then retains the original file.
+        try:
+            _validate_legacy_tail(path)
+        except (OSError, ValueError) as error:
+            raise MediaFormatError.from_cause(
+                path=path,
+                code=MediaErrorCode.TAG_WRITE_FAILED,
+                message=f"Cannot safely preserve TAK metadata: {error}",
+                cause=error,
+            ) from error
 
         try:
             audio = self._loader(path)

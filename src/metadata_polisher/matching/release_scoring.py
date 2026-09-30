@@ -1,119 +1,70 @@
 """Explainable scoring of one local group against release-medium candidates.
 
-The pipeline first extracts read-state-authorised local evidence, then chooses
-one preliminary correspondence inside the selected medium. Each dimension
-reports agreement separately from availability and contradiction. The final
-weighted ratio ranks candidates; coverage and conflict rules decide whether
-HIGH is justified. The track mapper still makes the final file-to-track choices.
+Local evidence extraction and immutable result values live in separate modules.
+This module chooses preliminary correspondences, calculates weighted dimensions
+and ranks candidates. Coverage and contradiction rules remain separate from the
+numerical ranking ratio; the track mapper makes the final file-to-track choices.
 """
 
 import math
-import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import date
-from enum import StrEnum
 
 from rapidfuzz.fuzz import ratio, token_set_ratio
 
 from metadata_polisher.domain.matching import LocalisedText, ProviderTrack, ReleaseCandidate, ReleaseMedium
-from metadata_polisher.domain.media import LocalMediaFile
-from metadata_polisher.domain.metadata import FieldReadState, MetadataField
-from metadata_polisher.matching.evidence import effective_local_title
 from metadata_polisher.matching.language import Language, Script, build_language_profile
+from metadata_polisher.matching.local_release_evidence import (
+    LocalEvidenceResult,
+    OrderedLocalTracks,
+    _clean_text,
+    _deterministic_unique,
+    _parse_year,
+    _positive_integer,
+    build_local_release_evidence,
+    order_local_track_files,
+)
 from metadata_polisher.matching.normalisation import normalise_for_matching
 from metadata_polisher.matching.policy import DEFAULT_MATCHING_POLICY, SCORE_DECIMAL_PLACES, MatchingPolicy
-from metadata_polisher.scanner.grouping import AlbumGroup
-
-_ISO_LIKE_DATE = re.compile(
-    r"^(?P<year>[0-9]{4})(?:-(?P<month>[0-9]{2})(?:-(?P<day>[0-9]{2}))?)?$"
+from metadata_polisher.matching.release_models import (
+    DimensionResult,
+    LocalEvidenceNotice,
+    LocalEvidenceSource,
+    LocalReleaseEvidence,
+    LocalTrackEvidence,
+    MatchClassification,
+    MatchEvidence,
+    MatchReasonCode,
+    RankedReleaseMedium,
+    ReleaseRanking,
+    ReleaseScore,
+    TrackPair,
+    TrackTitleResult,
+    WeightedDimension,
+    _typed_tuple,
 )
 
-
-# Release ranking asks which release plus medium fits a local group. It uses
-# ordered evidence for ranking; the separate track mapper performs the final
-# gap-aware alignment. A score is a comparison scale, not a probability.
-class MatchClassification(StrEnum):
-    """Review class derived from score, coverage, contradictions, and ambiguity."""
-
-    HIGH = "high"
-    REVIEW = "review"
-    LOW = "low"
-
-
-class LocalEvidenceSource(StrEnum):
-    """Authority tier retained when filename evidence fills a missing tag."""
-
-    TAG = "tag"
-    FILENAME = "filename"
-    MANUAL_OVERRIDE = "manual_override"
-
-
-class MatchReasonCode(StrEnum):
-    """Stable machine-readable reasons retained beside human-readable details."""
-
-    ALBUM_TITLE_EXACT = "ALBUM_TITLE_EXACT"
-    ALBUM_TITLE_SIMILARITY = "ALBUM_TITLE_SIMILARITY"
-    ALBUM_TITLE_UNAVAILABLE = "ALBUM_TITLE_UNAVAILABLE"
-    TRACK_TITLE_ORDER_EXACT = "TRACK_TITLE_ORDER_EXACT"
-    TRACK_TITLE_ORDER_AGREEMENT = "TRACK_TITLE_ORDER_AGREEMENT"
-    TRACK_TITLE_ORDER_UNAVAILABLE = "TRACK_TITLE_ORDER_UNAVAILABLE"
-    TRACK_TITLE_NUMBER_EXACT = "TRACK_TITLE_NUMBER_EXACT"
-    TRACK_TITLE_NUMBER_AGREEMENT = "TRACK_TITLE_NUMBER_AGREEMENT"
-    TRACK_COMPARISON_PARTIAL = "TRACK_COMPARISON_PARTIAL"
-    TRACK_COUNT_EXACT = "TRACK_COUNT_EXACT"
-    TRACK_COUNT_CONTRADICTION = "TRACK_COUNT_CONTRADICTION"
-    TRACK_COUNT_UNAVAILABLE = "TRACK_COUNT_UNAVAILABLE"
-    PROVIDER_LIST_INCOMPLETE = "PROVIDER_LIST_INCOMPLETE"
-    DURATION_CLOSE = "DURATION_CLOSE"
-    DURATION_AGREEMENT = "DURATION_AGREEMENT"
-    DURATION_LARGE_MISMATCH = "DURATION_LARGE_MISMATCH"
-    DURATION_UNAVAILABLE = "DURATION_UNAVAILABLE"
-    DISC_EXACT = "DISC_EXACT"
-    DISC_CONTRADICTION = "DISC_CONTRADICTION"
-    DISC_UNAVAILABLE = "DISC_UNAVAILABLE"
-    YEAR_EXACT = "YEAR_EXACT"
-    YEAR_NEAR = "YEAR_NEAR"
-    YEAR_CONTRADICTION = "YEAR_CONTRADICTION"
-    YEAR_UNAVAILABLE = "YEAR_UNAVAILABLE"
-    ARTIST_EXACT = "ARTIST_EXACT"
-    ARTIST_SIMILARITY = "ARTIST_SIMILARITY"
-    ARTIST_UNAVAILABLE = "ARTIST_UNAVAILABLE"
-    LANGUAGE_SCRIPT_MATCH = "LANGUAGE_SCRIPT_MATCH"
-    LANGUAGE_SCRIPT_MISMATCH = "LANGUAGE_SCRIPT_MISMATCH"
-    LANGUAGE_SCRIPT_UNAVAILABLE = "LANGUAGE_SCRIPT_UNAVAILABLE"
-    LOCAL_ALBUM_CONFLICT = "LOCAL_ALBUM_CONFLICT"
-    LOCAL_ARTIST_CONFLICT = "LOCAL_ARTIST_CONFLICT"
-    LOCAL_YEAR_CONFLICT = "LOCAL_YEAR_CONFLICT"
-    LOCAL_YEAR_INVALID = "LOCAL_YEAR_INVALID"
-    LOCAL_DISC_CONFLICT = "LOCAL_DISC_CONFLICT"
-    LOCAL_DISC_TOTAL_CONFLICT = "LOCAL_DISC_TOTAL_CONFLICT"
-    LOCAL_TRACK_ORDER_TAGGED = "LOCAL_TRACK_ORDER_TAGGED"
-    LOCAL_TRACK_ORDER_FILENAME = "LOCAL_TRACK_ORDER_FILENAME"
-    LOCAL_TRACK_ORDER_AMBIGUOUS = "LOCAL_TRACK_ORDER_AMBIGUOUS"
-    TRACK_TITLE_COVERAGE_INSUFFICIENT = "TRACK_TITLE_COVERAGE_INSUFFICIENT"
-    AMBIGUOUS_TOP_CANDIDATES = "AMBIGUOUS_TOP_CANDIDATES"
-    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
-    TRACK_TITLE_EXACT = "TRACK_TITLE_EXACT"
-    TRACK_TITLE_SIMILARITY = "TRACK_TITLE_SIMILARITY"
-    TRACK_TITLE_UNAVAILABLE = "TRACK_TITLE_UNAVAILABLE"
-    TRACK_DURATION_CLOSE = "TRACK_DURATION_CLOSE"
-    TRACK_DURATION_SIMILARITY = "TRACK_DURATION_SIMILARITY"
-    TRACK_DURATION_LARGE_MISMATCH = "TRACK_DURATION_LARGE_MISMATCH"
-    TRACK_DURATION_UNAVAILABLE = "TRACK_DURATION_UNAVAILABLE"
-    TRACK_NUMBER_EXACT_TAG = "TRACK_NUMBER_EXACT_TAG"
-    TRACK_NUMBER_EXACT_FILENAME = "TRACK_NUMBER_EXACT_FILENAME"
-    TRACK_NUMBER_CONFLICT = "TRACK_NUMBER_CONFLICT"
-    TRACK_NUMBER_UNAVAILABLE = "TRACK_NUMBER_UNAVAILABLE"
-    TRACK_SEQUENCE_POSITION = "TRACK_SEQUENCE_POSITION"
-    TRACK_MAPPING_COMPLETE = "TRACK_MAPPING_COMPLETE"
-    TRACK_MAPPING_PARTIAL = "TRACK_MAPPING_PARTIAL"
-    TRACK_MAPPING_AMBIGUOUS = "TRACK_MAPPING_AMBIGUOUS"
-    TRACK_MAPPING_INSUFFICIENT_EVIDENCE = "TRACK_MAPPING_INSUFFICIENT_EVIDENCE"
-    TRACK_CONTENT_SUPPORT_INSUFFICIENT = "TRACK_CONTENT_SUPPORT_INSUFFICIENT"
-    MANUAL_TRACK_ASSIGNMENT = "MANUAL_TRACK_ASSIGNMENT"
-    MANUAL_TRACK_UNMAPPED = "MANUAL_TRACK_UNMAPPED"
-
+# Explicit re-exports preserve existing callers while the smaller modules keep
+# extraction, data contracts and scoring separately readable. They refer to the
+# same classes and functions; there are no duplicated compatibility wrappers.
+__all__ = (
+    "LocalEvidenceNotice",
+    "LocalEvidenceResult",
+    "LocalEvidenceSource",
+    "LocalReleaseEvidence",
+    "LocalTrackEvidence",
+    "MatchClassification",
+    "MatchEvidence",
+    "MatchReasonCode",
+    "OrderedLocalTracks",
+    "RankedReleaseMedium",
+    "ReleaseRanking",
+    "ReleaseScore",
+    "build_local_release_evidence",
+    "order_local_track_files",
+    "rank_release_candidates",
+    "score_release_medium",
+)
 
 _STRONG_LOCAL_CONFLICTS = frozenset(
     {
@@ -124,645 +75,6 @@ _STRONG_LOCAL_CONFLICTS = frozenset(
         MatchReasonCode.LOCAL_DISC_TOTAL_CONFLICT,
     }
 )
-
-
-def _typed_tuple[T](name: str, values: object, item_type: type[T]) -> tuple[T, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise TypeError(f"{name} must be an ordered sequence")
-
-    copied = tuple(values)
-
-    if any(not isinstance(value, item_type) for value in copied):
-        raise TypeError(f"{name} must contain only {item_type.__name__} values")
-
-    return copied
-
-
-def _optional_positive_integer(name: str, value: object) -> None:
-    if value is None:
-        return
-
-    if type(value) is not int:
-        raise TypeError(f"{name} must be an integer or None")
-
-    if value <= 0:
-        raise ValueError(f"{name} must be greater than zero")
-
-
-def _optional_text(name: str, value: object) -> None:
-    if value is not None and not isinstance(value, str):
-        raise TypeError(f"{name} must be a string or None")
-
-
-def _duration(value: object) -> float | None:
-    if value is None:
-        return None
-
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError("duration_seconds must be a number or None")
-
-    normalised = float(value)
-
-    if not math.isfinite(normalised) or normalised < 0.0:
-        raise ValueError("duration_seconds must be finite and cannot be negative")
-
-    return normalised
-
-
-@dataclass(frozen=True)
-class MatchEvidence:
-    """One weighted contribution or non-scoring diagnostic reason."""
-
-    code: str
-    contribution: float
-    detail: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.code, str):
-            raise TypeError("code must be a string")
-
-        if not self.code:
-            raise ValueError("code must not be empty")
-
-        if isinstance(self.contribution, bool) or not isinstance(self.contribution, (int, float)):
-            raise TypeError("contribution must be a number")
-
-        contribution = float(self.contribution)
-
-        if not math.isfinite(contribution) or contribution < 0.0:
-            raise ValueError("contribution must be finite and cannot be negative")
-
-        if not isinstance(self.detail, str):
-            raise TypeError("detail must be a string")
-
-        if not self.detail.strip():
-            raise ValueError("detail must not be empty")
-
-        object.__setattr__(self, "contribution", contribution)
-
-
-@dataclass(frozen=True)
-class ReleaseScore:
-    """A deterministic 0–100 ranking score and its complete explanation."""
-
-    score: float
-    classification: MatchClassification
-    evidence: tuple[MatchEvidence, ...]
-
-    def __post_init__(self) -> None:
-        if isinstance(self.score, bool) or not isinstance(self.score, (int, float)):
-            raise TypeError("score must be a number")
-
-        score = float(self.score)
-
-        if not math.isfinite(score) or not 0.0 <= score <= 100.0:
-            raise ValueError("score must be finite and between zero and 100")
-
-        if not isinstance(self.classification, MatchClassification):
-            raise TypeError("classification must be MatchClassification")
-
-        object.__setattr__(self, "score", score)
-        object.__setattr__(self, "evidence", _typed_tuple("evidence", self.evidence, MatchEvidence))
-
-
-@dataclass(frozen=True)
-class LocalEvidenceNotice:
-    """Non-scoring local conflict that made one evidence dimension unknown."""
-
-    code: str
-    detail: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.code, str):
-            raise TypeError("code must be a string")
-
-        if not self.code:
-            raise ValueError("code must not be empty")
-
-        if not isinstance(self.detail, str):
-            raise TypeError("detail must be a string")
-
-        if not self.detail.strip():
-            raise ValueError("detail must not be empty")
-
-
-@dataclass(frozen=True)
-class LocalTrackEvidence:
-    """Comparison-only content and optional source numbering for one local file.
-
-    Numbers retain their authority tier; they are not synthetic array positions.
-    Existing callers may keep supplying only title and duration, which preserves
-    the positional preliminary comparison until corroborated numbering exists.
-    """
-
-    title: str | None
-    duration_seconds: float | None
-    track_number: int | None = None
-    track_number_source: LocalEvidenceSource | None = None
-
-    def __post_init__(self) -> None:
-        _optional_text("title", self.title)
-        object.__setattr__(self, "duration_seconds", _duration(self.duration_seconds))
-        _optional_positive_integer("track_number", self.track_number)
-
-        if self.track_number_source is not None and not isinstance(self.track_number_source, LocalEvidenceSource):
-            raise TypeError("track_number_source must be a LocalEvidenceSource or None")
-
-        if self.track_number is None and self.track_number_source is not None:
-            raise ValueError("track_number_source requires a track number")
-
-        if self.track_number is not None and self.track_number_source is None:
-            # Direct evidence follows the established disc-number constructor
-            # convention. The scanner builder marks weaker filename hints.
-            object.__setattr__(self, "track_number_source", LocalEvidenceSource.TAG)
-
-
-@dataclass(frozen=True)
-class LocalReleaseEvidence:
-    """Conservative local group evidence with conflicts represented as unknown."""
-
-    album_title: str | None
-    artists: tuple[str, ...]
-    year: int | None
-    disc_number: int | None
-    disc_total: int | None
-    tracks: tuple[LocalTrackEvidence, ...]
-    disc_number_source: LocalEvidenceSource | None = None
-    notices: tuple[LocalEvidenceNotice, ...] = ()
-
-    def __post_init__(self) -> None:
-        _optional_text("album_title", self.album_title)
-        artists = _typed_tuple("artists", self.artists, str)
-
-        if any(not artist.strip() for artist in artists):
-            raise ValueError("artists must not contain blank values")
-
-        _optional_positive_integer("year", self.year)
-        _optional_positive_integer("disc_number", self.disc_number)
-        _optional_positive_integer("disc_total", self.disc_total)
-
-        if self.disc_number_source is not None and not isinstance(
-            self.disc_number_source,
-            LocalEvidenceSource,
-        ):
-            raise TypeError("disc_number_source must be a LocalEvidenceSource or None")
-
-        if self.disc_number is None and self.disc_number_source is not None:
-            raise ValueError("disc_number_source requires a disc number")
-
-        if self.disc_number is not None and self.disc_number_source is None:
-            # Directly constructed evidence is authoritative by default. The
-            # local-file builder explicitly marks weaker filename-derived values.
-            object.__setattr__(self, "disc_number_source", LocalEvidenceSource.TAG)
-
-        object.__setattr__(self, "artists", artists)
-        object.__setattr__(self, "tracks", _typed_tuple("tracks", self.tracks, LocalTrackEvidence))
-        object.__setattr__(self, "notices", _typed_tuple("notices", self.notices, LocalEvidenceNotice))
-
-
-@dataclass(frozen=True)
-class RankedReleaseMedium:
-    """One independently scored release-medium combination."""
-
-    release: ReleaseCandidate
-    medium: ReleaseMedium
-    medium_index: int
-    result: ReleaseScore
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.release, ReleaseCandidate):
-            raise TypeError("release must be ReleaseCandidate")
-
-        if not isinstance(self.medium, ReleaseMedium):
-            raise TypeError("medium must be ReleaseMedium")
-
-        if type(self.medium_index) is not int:
-            raise TypeError("medium_index must be an integer")
-
-        if self.medium_index < 0:
-            raise ValueError("medium_index cannot be negative")
-
-        if not isinstance(self.result, ReleaseScore):
-            raise TypeError("result must be ReleaseScore")
-
-    @property
-    def identity(self) -> tuple[str, str, str, int]:
-        """Return a compact stable identity suitable for logs and UI state."""
-        return (
-            self.release.engine_id,
-            self.release.source_id,
-            self.release.release_id,
-            self.medium_index,
-        )
-
-
-@dataclass(frozen=True)
-class ReleaseRanking:
-    """Deterministically ordered release-medium results with ambiguity state."""
-
-    entries: tuple[RankedReleaseMedium, ...]
-    ambiguous: bool
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "entries", _typed_tuple("entries", self.entries, RankedReleaseMedium))
-
-        if not isinstance(self.ambiguous, bool):
-            raise TypeError("ambiguous must be a bool")
-
-    @property
-    def identities(self) -> tuple[tuple[str, str, str, int], ...]:
-        """Expose stable identities without discarding the full ranked entries."""
-        return tuple(entry.identity for entry in self.entries)
-
-
-def _clean_text(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-
-    cleaned = " ".join(value.split())
-
-    return cleaned or None
-
-
-# Group equivalent spellings for comparison, then select an original spelling
-# with explicit tie-breaks. Provider/input iteration order must not decide
-# which text appears in evidence or which artist set is compared.
-def _deterministic_unique(values: Iterable[str]) -> tuple[str, ...]:
-    variants: dict[str, set[str]] = {}
-
-    for value in values:
-        cleaned = _clean_text(value)
-
-        if cleaned is None:
-            continue
-
-        variants.setdefault(normalise_for_matching(cleaned), set()).add(cleaned)
-
-    representatives = (
-        min(originals, key=lambda item: (item.casefold(), item))
-        for originals in variants.values()
-    )
-
-    return tuple(sorted(representatives, key=lambda item: (item.casefold(), item)))
-
-
-def _parse_year(value: object) -> int | None:
-    cleaned = _clean_text(value)
-
-    if cleaned is None:
-        return None
-
-    # Validate the whole supported date shape before extracting its year.
-    # Taking the first four characters of arbitrary text would turn malformed
-    # metadata into apparently reliable release-year evidence.
-    match = _ISO_LIKE_DATE.fullmatch(cleaned)
-
-    if match is None:
-        return None
-
-    year = int(match.group("year"))
-    month_text = match.group("month")
-    day_text = match.group("day")
-
-    if year == 0:
-        return None
-
-    if month_text is None:
-        return year
-
-    month = int(month_text)
-
-    if not 1 <= month <= 12:
-        return None
-
-    if day_text is None:
-        return year
-
-    try:
-        date(year, month, int(day_text))
-    except ValueError:
-        return None
-
-    return year
-
-
-def _present(file: LocalMediaFile, field: MetadataField) -> bool:
-    return file.read_result.field_states[field] is FieldReadState.PRESENT
-
-
-# Consensus means all usable values agree after conservative normalisation.
-# Do not select the majority album from a mixed group: preserve a conflict
-# notice and leave the value unknown so the reviewer can correct the group.
-def _consensus_text(
-    values: Iterable[str],
-    *,
-    conflict_code: MatchReasonCode,
-    field_label: str,
-) -> tuple[str | None, LocalEvidenceNotice | None]:
-    variants: dict[str, set[str]] = {}
-
-    for value in values:
-        cleaned = _clean_text(value)
-
-        if cleaned is not None:
-            variants.setdefault(normalise_for_matching(cleaned), set()).add(cleaned)
-
-    if not variants:
-        return None, None
-
-    if len(variants) > 1:
-        return None, LocalEvidenceNotice(
-            code=conflict_code,
-            detail=f"Present local {field_label} values disagree, so this dimension is unknown.",
-        )
-
-    originals = next(iter(variants.values()))
-
-    return min(originals, key=lambda item: (item.casefold(), item)), None
-
-
-def _consensus_integer(
-    values: Iterable[int],
-    *,
-    conflict_code: MatchReasonCode,
-    field_label: str,
-) -> tuple[int | None, LocalEvidenceNotice | None]:
-    distinct = set(values)
-
-    if not distinct:
-        return None, None
-
-    if len(distinct) > 1:
-        return None, LocalEvidenceNotice(
-            code=conflict_code,
-            detail=f"Local {field_label} values disagree, so this dimension is unknown.",
-        )
-
-    return next(iter(distinct)), None
-
-
-def _positive_integer(value: object) -> int | None:
-    if type(value) is not int or value <= 0:
-        return None
-
-    return value
-
-
-def _present_track_number(file: LocalMediaFile) -> int | None:
-    if not _present(file, MetadataField.TRACK):
-        return None
-
-    return _positive_integer(file.read_result.metadata.track.number)
-
-
-def order_local_track_files(
-    files: tuple[LocalMediaFile, ...],
-) -> tuple[tuple[LocalMediaFile, ...], LocalEvidenceNotice | None]:
-    """Choose one evidence-based sequence shared by release and track matching.
-
-    Complete unique track tags establish album order independently of filename
-    spelling. Filename numbers are a fallback only when no usable tags exist;
-    incomplete or duplicated tags keep the caller's order and record ambiguity.
-    """
-    tagged = tuple((file, _present_track_number(file)) for file in files)
-    usable_tagged = tuple((file, number) for file, number in tagged if number is not None)
-
-    # Choose one ordering tier for the entire group. Mixing a few real tags
-    # with filename hints could silently assemble a sequence neither source
-    # actually supports, so incomplete real numbering retains visible order.
-    if usable_tagged:
-        tagged_numbers = tuple(number for _file, number in usable_tagged)
-
-        if len(usable_tagged) == len(files) and len(tagged_numbers) == len(set(tagged_numbers)):
-            return (
-                tuple(file for file, _number in sorted(usable_tagged, key=lambda item: item[1])),
-                LocalEvidenceNotice(
-                    code=MatchReasonCode.LOCAL_TRACK_ORDER_TAGGED,
-                    detail="Local tracks were ordered by unique PRESENT track-number tags.",
-                ),
-            )
-
-        return files, LocalEvidenceNotice(
-            code=MatchReasonCode.LOCAL_TRACK_ORDER_AMBIGUOUS,
-            detail="Present track-number tags are incomplete or duplicated; visible group order was retained.",
-        )
-
-    filename_numbered = tuple(
-        (file, _positive_integer(file.filename_hints.track_number))
-        for file in files
-    )
-    usable_filename = tuple(
-        (file, number)
-        for file, number in filename_numbered
-        if number is not None
-    )
-    filename_numbers = tuple(number for _file, number in usable_filename)
-
-    if len(usable_filename) == len(files) and len(filename_numbers) == len(set(filename_numbers)):
-        return (
-            tuple(file for file, _number in sorted(usable_filename, key=lambda item: item[1])),
-            LocalEvidenceNotice(
-                code=MatchReasonCode.LOCAL_TRACK_ORDER_FILENAME,
-                detail="No usable track-number tags exist; local tracks were ordered by filename hints.",
-            ),
-        )
-
-    return files, None
-
-
-def _local_artists(files: tuple[LocalMediaFile, ...]) -> tuple[tuple[str, ...], LocalEvidenceNotice | None]:
-    album_artist_sets: list[tuple[str, ...]] = []
-
-    for file in files:
-        if not _present(file, MetadataField.ALBUM_ARTISTS):
-            continue
-
-        artists = _deterministic_unique(file.read_result.metadata.album_artists)
-
-        if artists:
-            album_artist_sets.append(artists)
-
-    if album_artist_sets:
-        # Canonical equality is independent of the display representatives'
-        # ordering: full-width A can sort after B although canonical a precedes b.
-        normalised_sets = {
-            frozenset(normalise_for_matching(artist) for artist in artists)
-            for artists in album_artist_sets
-        }
-
-        if len(normalised_sets) > 1:
-            return (), LocalEvidenceNotice(
-                code=MatchReasonCode.LOCAL_ARTIST_CONFLICT,
-                detail="Present local album-artist values disagree, so artist evidence is unknown.",
-            )
-
-        representative = min(
-            album_artist_sets,
-            key=lambda artists: tuple((artist.casefold(), artist) for artist in artists),
-        )
-
-        return representative, None
-
-    # Track artists can legitimately vary across an album. When no album artist
-    # exists, retain their deterministic union instead of labelling variation a conflict.
-    return (
-        _deterministic_unique(
-            artist
-            for file in files
-            if _present(file, MetadataField.ARTISTS)
-            for artist in file.read_result.metadata.artists
-        ),
-        None,
-    )
-
-
-def build_local_release_evidence(group: AlbumGroup) -> LocalReleaseEvidence:
-    """Extract only trustworthy local values, with per-file filename fallback."""
-    files = tuple(group.files)
-    notices: list[LocalEvidenceNotice] = []
-    album_title, album_notice = _consensus_text(
-        (
-            file.read_result.metadata.album
-            for file in files
-            if _present(file, MetadataField.ALBUM)
-            if isinstance(file.read_result.metadata.album, str)
-        ),
-        conflict_code=MatchReasonCode.LOCAL_ALBUM_CONFLICT,
-        field_label="album",
-    )
-
-    if album_notice is not None:
-        notices.append(album_notice)
-
-    artists, artist_notice = _local_artists(files)
-
-    if artist_notice is not None:
-        notices.append(artist_notice)
-
-    # Read-state flags are part of the evidence contract. A stale value stored
-    # beside an UNREADABLE or UNSUPPORTED state must not contribute a year.
-    present_date_values = tuple(
-        file.read_result.metadata.date
-        for file in files
-        if _present(file, MetadataField.DATE)
-        if isinstance(file.read_result.metadata.date, str)
-    )
-    parsed_years = tuple(year for value in present_date_values if (year := _parse_year(value)) is not None)
-
-    if len(parsed_years) != len(present_date_values):
-        notices.append(
-            LocalEvidenceNotice(
-                code=MatchReasonCode.LOCAL_YEAR_INVALID,
-                detail="At least one present local date is invalid, so it cannot contribute year evidence.",
-            )
-        )
-
-    year, year_notice = _consensus_integer(
-        parsed_years,
-        conflict_code=MatchReasonCode.LOCAL_YEAR_CONFLICT,
-        field_label="year",
-    )
-
-    if year_notice is not None:
-        notices.append(year_notice)
-
-    ordered_track_files, order_notice = order_local_track_files(files)
-
-    if order_notice is not None:
-        notices.append(order_notice)
-
-    tagged_disc_numbers: list[int] = []
-    filename_disc_numbers: list[int] = []
-    disc_number_sources: list[LocalEvidenceSource] = []
-    disc_totals: list[int] = []
-    tracks: list[LocalTrackEvidence] = []
-
-    # Select the numbering source globally, just as ordering does. A missing
-    # tag among otherwise tagged files cannot be patched with a filename hint
-    # to manufacture apparently complete, single-source numbering.
-    has_tagged_track_numbers = any(_present_track_number(file) is not None for file in files)
-
-    for file in ordered_track_files:
-        if has_tagged_track_numbers:
-            track_number = _present_track_number(file)
-            track_number_source = LocalEvidenceSource.TAG
-        else:
-            track_number = _positive_integer(file.filename_hints.track_number)
-            track_number_source = LocalEvidenceSource.FILENAME
-
-        tracks.append(
-            LocalTrackEvidence(
-                title=effective_local_title(file),
-                duration_seconds=file.read_result.stream_info.duration_seconds,
-                track_number=track_number,
-                track_number_source=track_number_source if track_number is not None else None,
-            )
-        )
-
-    for file in files:
-        if _present(file, MetadataField.DISC):
-            tagged_disc_number = _positive_integer(file.read_result.metadata.disc.number)
-            tagged_disc_total = _positive_integer(file.read_result.metadata.disc.total)
-
-            if tagged_disc_number is not None:
-                tagged_disc_numbers.append(tagged_disc_number)
-
-            if tagged_disc_total is not None:
-                disc_totals.append(tagged_disc_total)
-
-        filename_disc_number = _positive_integer(file.filename_hints.disc_number)
-
-        if filename_disc_number is not None:
-            filename_disc_numbers.append(filename_disc_number)
-
-    # The evidence tiers are global for the group: any usable real disc tag
-    # outranks every filename hint. Filename consensus is considered only when
-    # the group contains no usable tagged disc number at all.
-    if tagged_disc_numbers:
-        selected_disc_numbers = tagged_disc_numbers
-        disc_number_sources.append(LocalEvidenceSource.TAG)
-    else:
-        selected_disc_numbers = filename_disc_numbers
-
-        if filename_disc_numbers:
-            disc_number_sources.append(LocalEvidenceSource.FILENAME)
-
-    disc_number, disc_notice = _consensus_integer(
-        selected_disc_numbers,
-        conflict_code=MatchReasonCode.LOCAL_DISC_CONFLICT,
-        field_label="disc-number",
-    )
-    disc_total, disc_total_notice = _consensus_integer(
-        disc_totals,
-        conflict_code=MatchReasonCode.LOCAL_DISC_TOTAL_CONFLICT,
-        field_label="disc-total",
-    )
-
-    if disc_notice is not None:
-        notices.append(disc_notice)
-
-    if disc_total_notice is not None:
-        notices.append(disc_total_notice)
-
-    disc_number_source = None
-
-    if disc_number is not None:
-        disc_number_source = (
-            LocalEvidenceSource.TAG
-            if LocalEvidenceSource.TAG in disc_number_sources
-            else LocalEvidenceSource.FILENAME
-        )
-
-    return LocalReleaseEvidence(
-        album_title=album_title,
-        artists=artists,
-        year=year,
-        disc_number=disc_number,
-        disc_total=disc_total,
-        tracks=tuple(tracks),
-        disc_number_source=disc_number_source,
-        notices=tuple(notices),
-    )
 
 
 @dataclass(frozen=True)
@@ -794,20 +106,20 @@ def _album_dimension(
     local: LocalReleaseEvidence,
     release: ReleaseCandidate,
     weight: float,
-) -> tuple[MatchEvidence, float, bool]:
+) -> DimensionResult:
     # A provider may offer several original title variants. The strongest
     # comparison supplies this one dimension; variants do not add extra weight.
     provider_titles = tuple(title.value for title in release.titles if _clean_text(title.value) is not None)
 
     if local.album_title is None or not provider_titles:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.ALBUM_TITLE_UNAVAILABLE,
                 0.0,
                 "Album-title evidence is missing or conflicted on one side.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     similarity = max(_text_similarity(local.album_title, title) for title in provider_titles)
@@ -817,10 +129,10 @@ def _album_dimension(
         else MatchReasonCode.ALBUM_TITLE_SIMILARITY
     )
 
-    return (
-        _evidence(code, weight * similarity, f"Best album-title similarity is {similarity * 100:.1f}%."),
-        weight,
-        False,
+    return DimensionResult(
+        evidence=_evidence(code, weight * similarity, f"Best album-title similarity is {similarity * 100:.1f}%."),
+        available=bool(weight),
+        strong_contradiction=False,
     )
 
 
@@ -837,7 +149,7 @@ def _best_provider_title_similarity(local_title: str, titles: tuple[LocalisedTex
 class _TrackComparison:
     """One reusable preliminary pairing, distinct from final track assignment."""
 
-    pairs: tuple[tuple[LocalTrackEvidence, ProviderTrack], ...]
+    pairs: tuple[TrackPair, ...]
     uses_numbers: bool = False
     has_unpaired_tracks: bool = False
 
@@ -892,7 +204,10 @@ def _preliminary_track_comparison(
     existing positional result recoverable for later mapping and human review.
     """
     positional = _TrackComparison(
-        pairs=tuple(zip(local.tracks, medium.tracks, strict=False)),
+        pairs=tuple(
+            TrackPair(local=local_track, provider=provider_track)
+            for local_track, provider_track in zip(local.tracks, medium.tracks, strict=False)
+        ),
         has_unpaired_tracks=len(local.tracks) != len(medium.tracks),
     )
     local_numbers = tuple(track.track_number for track in local.tracks)
@@ -934,11 +249,11 @@ def _preliminary_track_comparison(
         return positional
 
     pairs = tuple(
-        (local.tracks[local_index], medium.tracks[provider_index])
+        TrackPair(local=local.tracks[local_index], provider=medium.tracks[provider_index])
         for local_index, provider_index in index_pairs
     )
 
-    if not all(_number_pair_has_content_support(left, right, policy) for left, right in pairs):
+    if not all(_number_pair_has_content_support(pair.local, pair.provider, policy) for pair in pairs):
         return positional
 
     positional_indexes = tuple((index, index) for index in range(len(positional.pairs)))
@@ -962,16 +277,16 @@ def _track_title_dimension(
     medium: ReleaseMedium,
     weight: float,
     comparison: _TrackComparison,
-) -> tuple[MatchEvidence, float, bool, float]:
+) -> TrackTitleResult:
     similarities: list[float] = []
 
     # Title and duration inspect the same preliminary pairs. Otherwise one
     # dimension could reward a repaired gap while another invents a conflict.
-    for local_track, provider_track in comparison.pairs:
-        if local_track.title is None:
+    for pair in comparison.pairs:
+        if pair.local.title is None:
             continue
 
-        similarity = _best_provider_title_similarity(local_track.title, provider_track.titles)
+        similarity = _best_provider_title_similarity(pair.local.title, pair.provider.titles)
 
         if similarity is not None:
             similarities.append(similarity)
@@ -983,15 +298,17 @@ def _track_title_dimension(
     coverage = len(similarities) / sequence_length if sequence_length else 0.0
 
     if not similarities:
-        return (
-            _evidence(
-                MatchReasonCode.TRACK_TITLE_ORDER_UNAVAILABLE,
-                0.0,
-                "No local/provider title pairs are available in the preliminary correspondence.",
+        return TrackTitleResult(
+            dimension=DimensionResult(
+                evidence=_evidence(
+                    MatchReasonCode.TRACK_TITLE_ORDER_UNAVAILABLE,
+                    0.0,
+                    "No local/provider title pairs are available in the preliminary correspondence.",
+                ),
+                available=False,
+                strong_contradiction=False,
             ),
-            0.0,
-            False,
-            coverage,
+            coverage=coverage,
         )
 
     agreement = sum(similarities) / len(similarities)
@@ -1007,18 +324,20 @@ def _track_title_dimension(
 
     code = exact_code if agreement == 1.0 else similar_code
 
-    return (
-        _evidence(
-            code,
-            weight * agreement,
-            (
-                f"{method} title agreement is {agreement * 100:.1f}% across "
-                f"{len(similarities)}/{sequence_length} positions."
+    return TrackTitleResult(
+        dimension=DimensionResult(
+            evidence=_evidence(
+                code,
+                weight * agreement,
+                (
+                    f"{method} title agreement is {agreement * 100:.1f}% across "
+                    f"{len(similarities)}/{sequence_length} positions."
+                ),
             ),
+            available=bool(weight),
+            strong_contradiction=False,
         ),
-        weight,
-        False,
-        coverage,
+        coverage=coverage,
     )
 
 
@@ -1026,32 +345,32 @@ def _track_count_dimension(
     local: LocalReleaseEvidence,
     medium: ReleaseMedium,
     weight: float,
-) -> tuple[MatchEvidence, float, bool]:
+) -> DimensionResult:
     local_count = len(local.tracks)
     # A visible row count cannot establish an exact match when the provider
     # supplied only part of its listing or has unsupported count semantics.
     provider_count = medium.track_total
 
     if local_count == 0 or provider_count is None:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.TRACK_COUNT_UNAVAILABLE,
                 0.0,
                 "A complete local/provider count pair is unavailable for selected-medium comparison.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     if local_count == provider_count:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.TRACK_COUNT_EXACT,
                 weight,
                 f"Track count agrees: {local_count} local and {provider_count} selected-medium tracks.",
             ),
-            weight,
-            False,
+            available=bool(weight),
+            strong_contradiction=False,
         )
 
     # Use the smaller count divided by the larger so either missing or extra
@@ -1060,14 +379,14 @@ def _track_count_dimension(
     largest_count = max(local_count, provider_count)
     similarity = min(local_count, provider_count) / largest_count if largest_count else 0.0
 
-    return (
-        _evidence(
+    return DimensionResult(
+        evidence=_evidence(
             MatchReasonCode.TRACK_COUNT_CONTRADICTION,
             weight * similarity,
             f"Track count conflicts: {local_count} local and {provider_count} selected-medium tracks.",
         ),
-        weight,
-        True,
+        available=bool(weight),
+        strong_contradiction=True,
     )
 
 
@@ -1090,22 +409,22 @@ def _duration_dimension(
     comparison: _TrackComparison,
     weight: float,
     policy: MatchingPolicy,
-) -> tuple[MatchEvidence, float, bool]:
+) -> DimensionResult:
     deltas = tuple(
-        abs(local_track.duration_seconds - provider_track.duration_seconds)
-        for local_track, provider_track in comparison.pairs
-        if local_track.duration_seconds is not None and provider_track.duration_seconds is not None
+        abs(pair.local.duration_seconds - pair.provider.duration_seconds)
+        for pair in comparison.pairs
+        if pair.local.duration_seconds is not None and pair.provider.duration_seconds is not None
     )
 
     if not deltas:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.DURATION_UNAVAILABLE,
                 0.0,
                 "No local/provider duration pairs are available in the preliminary correspondence.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     # Average only known duration pairs, but inspect the worst difference
@@ -1121,14 +440,14 @@ def _duration_dimension(
     else:
         code = MatchReasonCode.DURATION_AGREEMENT
 
-    return (
-        _evidence(
+    return DimensionResult(
+        evidence=_evidence(
             code,
             weight * similarity,
             f"Duration agreement uses {len(deltas)} pairs; largest difference is {largest_delta:.3f} seconds.",
         ),
-        weight,
-        has_large_mismatch,
+        available=bool(weight),
+        strong_contradiction=has_large_mismatch,
     )
 
 
@@ -1137,7 +456,7 @@ def _disc_dimension(
     release: ReleaseCandidate,
     medium: ReleaseMedium,
     weight: float,
-) -> tuple[MatchEvidence, float, bool]:
+) -> DimensionResult:
     # Disc number and disc total are separate comparisons within one weight.
     # If both are known and only one agrees, this dimension earns half its
     # weight. Filename-only disc disagreement remains weaker than a real tag.
@@ -1167,27 +486,27 @@ def _disc_dimension(
         strong_contradiction = strong_contradiction or not disc_total_matches
 
     if not comparisons:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.DISC_UNAVAILABLE,
                 0.0,
                 "Disc number/count evidence is unavailable on one side.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     agreement = sum(comparisons) / len(comparisons)
     exact = all(comparisons)
 
-    return (
-        _evidence(
+    return DimensionResult(
+        evidence=_evidence(
             MatchReasonCode.DISC_EXACT if exact else MatchReasonCode.DISC_CONTRADICTION,
             weight * agreement,
             "Disc comparison: " + ", ".join(descriptions) + ".",
         ),
-        weight,
-        strong_contradiction,
+        available=bool(weight),
+        strong_contradiction=strong_contradiction,
     )
 
 
@@ -1195,54 +514,54 @@ def _year_dimension(
     local: LocalReleaseEvidence,
     release: ReleaseCandidate,
     weight: float,
-) -> tuple[MatchEvidence, float, bool]:
+) -> DimensionResult:
     provider_year = _parse_year(release.date)
 
     if local.year is None or provider_year is None:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.YEAR_UNAVAILABLE,
                 0.0,
                 "A valid local/provider year pair is unavailable.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     difference = abs(local.year - provider_year)
 
     if difference == 0:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.YEAR_EXACT,
                 weight,
                 f"Release years agree at {local.year}.",
             ),
-            weight,
-            False,
+            available=bool(weight),
+            strong_contradiction=False,
         )
 
     # A one-year difference can occur between release editions, so retain half
     # the year weight. Wider differences contribute zero and cap confidence.
     if difference == 1:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.YEAR_NEAR,
                 weight * 0.5,
                 f"Release years differ by one ({local.year} versus {provider_year}).",
             ),
-            weight,
-            False,
+            available=bool(weight),
+            strong_contradiction=False,
         )
 
-    return (
-        _evidence(
+    return DimensionResult(
+        evidence=_evidence(
             MatchReasonCode.YEAR_CONTRADICTION,
             0.0,
             f"Release years strongly conflict ({local.year} versus {provider_year}).",
         ),
-        weight,
-        True,
+        available=bool(weight),
+        strong_contradiction=True,
     )
 
 
@@ -1250,18 +569,18 @@ def _artist_dimension(
     local: LocalReleaseEvidence,
     release: ReleaseCandidate,
     weight: float,
-) -> tuple[MatchEvidence, float, bool]:
+) -> DimensionResult:
     provider_artists = _deterministic_unique(release.album_artists)
 
     if not local.artists or not provider_artists:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.ARTIST_UNAVAILABLE,
                 0.0,
                 "Album-artist evidence is unavailable on one side.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     local_text = " ; ".join(normalise_for_matching(artist) for artist in local.artists)
@@ -1273,14 +592,14 @@ def _artist_dimension(
 
     # A fuzzy value helps ranking minor spelling variants; exact set agreement is
     # retained as its own reason so a reviewer can distinguish the two situations.
-    return (
-        _evidence(
+    return DimensionResult(
+        evidence=_evidence(
             MatchReasonCode.ARTIST_EXACT if exact else MatchReasonCode.ARTIST_SIMILARITY,
             weight * similarity,
             f"Album-artist similarity is {similarity * 100:.1f}%.",
         ),
-        weight,
-        False,
+        available=bool(weight),
+        strong_contradiction=False,
     )
 
 
@@ -1344,7 +663,7 @@ def _language_dimension(
     release: ReleaseCandidate,
     medium: ReleaseMedium,
     weight: float,
-) -> tuple[MatchEvidence, float, bool]:
+) -> DimensionResult:
     # Infer local preference from its actual text, including artists, without
     # inferring Japanese or Chinese from Han alone. This is an offered-variant
     # preference for ranking; the proposal layer separately chooses written text.
@@ -1356,14 +675,14 @@ def _language_dimension(
     local_profile = build_language_profile(local_texts)
 
     if local_profile.ambiguous or not local_profile.script_evidence:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.LANGUAGE_SCRIPT_UNAVAILABLE,
                 0.0,
                 "Local language/script evidence is absent or ambiguous.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     # Keep variants separate for the native-language decision. Combining the
@@ -1382,14 +701,14 @@ def _language_dimension(
     )
 
     if not provider_scripts:
-        return (
-            _evidence(
+        return DimensionResult(
+            evidence=_evidence(
                 MatchReasonCode.LANGUAGE_SCRIPT_UNAVAILABLE,
                 0.0,
                 "Provider text has no observed script evidence.",
             ),
-            0.0,
-            False,
+            available=False,
+            strong_contradiction=False,
         )
 
     preferred_language = local_profile.preferred_language
@@ -1412,14 +731,14 @@ def _language_dimension(
         relationship = "matches" if matches else "conflicts with"
         detail = f"Local script evidence ({script_labels}) {relationship} observed provider text."
 
-    return (
-        _evidence(
+    return DimensionResult(
+        evidence=_evidence(
             MatchReasonCode.LANGUAGE_SCRIPT_MATCH if matches else MatchReasonCode.LANGUAGE_SCRIPT_MISMATCH,
             weight if matches else 0.0,
             detail,
         ),
-        weight,
-        False,
+        available=bool(weight),
+        strong_contradiction=False,
     )
 
 
@@ -1431,7 +750,7 @@ def _score_state(
 ) -> _ScoringState:
     weights = policy.release_weights
     comparison = _preliminary_track_comparison(local, medium, policy)
-    title_evidence, title_available, title_strong, coverage = _track_title_dimension(
+    titles = _track_title_dimension(
         local,
         medium,
         1.0,
@@ -1441,16 +760,20 @@ def _score_state(
     # Ask dimensions for agreement on a unit weight. This keeps the exact
     # fractional agreement separate from user-supplied weight magnitudes and
     # from the rounded contributions shown in the explanation dialog.
-    # The returned availability is one for a comparison, zero for unknown.
+    # Availability is a bool: unknown dimensions leave the denominator, whereas
+    # an available zero agreement still carries its complete policy weight.
     dimensions = (
-        (weights.album_title, _album_dimension(local, release, 1.0)),
-        (weights.track_title_order, (title_evidence, title_available, title_strong)),
-        (weights.selected_medium_track_count, _track_count_dimension(local, medium, 1.0)),
-        (weights.duration, _duration_dimension(comparison, 1.0, policy)),
-        (weights.disc, _disc_dimension(local, release, medium, 1.0)),
-        (weights.year, _year_dimension(local, release, 1.0)),
-        (weights.artist, _artist_dimension(local, release, 1.0)),
-        (weights.language_script, _language_dimension(local, release, medium, 1.0)),
+        WeightedDimension(weight=weights.album_title, result=_album_dimension(local, release, 1.0)),
+        WeightedDimension(weight=weights.track_title_order, result=titles.dimension),
+        WeightedDimension(
+            weight=weights.selected_medium_track_count,
+            result=_track_count_dimension(local, medium, 1.0),
+        ),
+        WeightedDimension(weight=weights.duration, result=_duration_dimension(comparison, 1.0, policy)),
+        WeightedDimension(weight=weights.disc, result=_disc_dimension(local, release, medium, 1.0)),
+        WeightedDimension(weight=weights.year, result=_year_dimension(local, release, 1.0)),
+        WeightedDimension(weight=weights.artist, result=_artist_dimension(local, release, 1.0)),
+        WeightedDimension(weight=weights.language_script, result=_language_dimension(local, release, medium, 1.0)),
     )
 
     # Dividing numerator and denominator by the same positive maximum leaves
@@ -1459,23 +782,29 @@ def _score_state(
     # Only available weights set the scale: a huge but unavailable dimension
     # must not underflow all the dimensions we can actually compare.
     available = tuple(
-        (weight, item)
-        for weight, (item, is_available, _is_strong) in dimensions
-        if is_available
+        dimension
+        for dimension in dimensions
+        if dimension.result.available
     )
-    scale = max((weight for weight, _item in available), default=1.0)
-    weighted_total = math.fsum(item.contribution * (weight / scale) for weight, item in available)
-    available_weight = math.fsum(weight / scale for weight, _item in available)
+    scale = max((dimension.weight for dimension in available), default=1.0)
+    weighted_total = math.fsum(
+        dimension.result.evidence.contribution * (dimension.weight / scale)
+        for dimension in available
+    )
+    available_weight = math.fsum(dimension.weight / scale for dimension in available)
 
     # Ratios smaller than floating-point representation can still underflow;
     # that is a representational limit, not a new minimum accepted weight.
     # Public evidence remains in familiar raw policy-weight units, rounded to
     # six decimals. Consumers must not reconstruct the ratio from these values.
     evidence = [
-        replace(item, contribution=round(item.contribution * weight, SCORE_DECIMAL_PLACES))
-        for weight, (item, _is_available, _is_strong) in dimensions
+        replace(
+            dimension.result.evidence,
+            contribution=round(dimension.result.evidence.contribution * dimension.weight, SCORE_DECIMAL_PLACES),
+        )
+        for dimension in dimensions
     ]
-    strong_contradiction = any(is_strong for _weight, (_item, _available, is_strong) in dimensions)
+    strong_contradiction = any(dimension.result.strong_contradiction for dimension in dimensions)
 
     if comparison.has_unpaired_tracks:
         # Counts can match even if one file is missing and another is extra.
@@ -1499,7 +828,7 @@ def _score_state(
         weighted_total=weighted_total,
         available_weight=available_weight,
         strong_contradiction=strong_contradiction,
-        track_title_coverage=coverage,
+        track_title_coverage=titles.coverage,
     )
 
 
@@ -1597,7 +926,7 @@ def score_release_medium(
 # Sort score descending, then stable source identities and medium position.
 # Explicit secondary keys prevent network response order from deciding an
 # equal-score winner; an absent medium number sorts after known numbers.
-def _ranking_key(entry: RankedReleaseMedium) -> tuple[object, ...]:
+def _ranking_key(entry: RankedReleaseMedium) -> tuple[float, str, str, str, str, str, str, bool, int, int]:
     release = entry.release
     medium_number = entry.medium.medium_number
 

@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import cast
+from typing import assert_never, cast
 
 
 class MetadataField(Enum):
@@ -73,6 +73,11 @@ class Position:
         _validate_position_component("total", self.total)
 
 
+# All review and format-neutral lookups share these semantic value types.
+# None represents absence; an empty collection or position remains a value.
+type FieldValue = str | tuple[str, ...] | Position
+
+
 @dataclass(frozen=True)
 class MetadataSnapshot:
     """Format-neutral values for every metadata field managed in V1."""
@@ -98,6 +103,44 @@ class MetadataSnapshot:
         )
         object.__setattr__(self, "composers", _normalise_string_tuple("composers", self.composers))
         object.__setattr__(self, "genres", _normalise_string_tuple("genres", self.genres))
+
+
+def metadata_value(metadata: MetadataSnapshot, field: MetadataField) -> FieldValue | None:
+    """Read a managed field without losing its type through dynamic getattr.
+
+    Each enum member names a specific snapshot attribute. An exhaustive match
+    makes a newly added field visible to the type checker instead of silently
+    returning Any, while preserving all empty and partially known values.
+    """
+    match field:
+        case MetadataField.TITLE:
+            return metadata.title
+
+        case MetadataField.ARTISTS:
+            return metadata.artists
+
+        case MetadataField.ALBUM:
+            return metadata.album
+
+        case MetadataField.ALBUM_ARTISTS:
+            return metadata.album_artists
+
+        case MetadataField.COMPOSERS:
+            return metadata.composers
+
+        case MetadataField.TRACK:
+            return metadata.track
+
+        case MetadataField.DISC:
+            return metadata.disc
+
+        case MetadataField.DATE:
+            return metadata.date
+
+        case MetadataField.GENRES:
+            return metadata.genres
+
+    assert_never(field)
 
 
 @dataclass(frozen=True)

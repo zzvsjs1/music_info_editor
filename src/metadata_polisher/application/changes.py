@@ -13,6 +13,7 @@ from metadata_polisher.domain.metadata import (
     MetadataField,
     MetadataSnapshot,
     Position,
+    metadata_value,
 )
 from metadata_polisher.domain.review import FieldDecisionKind, FieldReviewState, FieldValue
 from metadata_polisher.rename.template import (
@@ -57,6 +58,7 @@ class ChangeIssueCode(StrEnum):
     """Stable reasons emitted by pure ChangeSet validation."""
 
     SOURCE_NOT_READABLE = "SOURCE_NOT_READABLE"
+    SOURCE_CHANGED = "SOURCE_CHANGED"
     DIRECTORY_NOT_WRITABLE = "DIRECTORY_NOT_WRITABLE"
     DIRECTORY_LISTING_UNAVAILABLE = "DIRECTORY_LISTING_UNAVAILABLE"
     ADAPTER_UNAVAILABLE = "ADAPTER_UNAVAILABLE"
@@ -108,10 +110,12 @@ class ChangeValidationFacts:
     track_mapping_resolved: bool = True
     unsupported_write_fields: tuple[MetadataField, ...] = ()
     existing_names: tuple[str, ...] = ()
+    source_unchanged: bool = True
 
     def __post_init__(self) -> None:
         for name in (
             "source_readable",
+            "source_unchanged",
             "directory_writable",
             "directory_listing_available",
             "adapter_available",
@@ -308,37 +312,6 @@ def _copy_complete_reviews(values: object) -> tuple[FieldReviewState, ...]:
     return reviews
 
 
-def _metadata_value(metadata: MetadataSnapshot, field: MetadataField) -> FieldValue | None:
-    if field is MetadataField.TITLE:
-        return metadata.title
-
-    if field is MetadataField.ARTISTS:
-        return metadata.artists
-
-    if field is MetadataField.ALBUM:
-        return metadata.album
-
-    if field is MetadataField.ALBUM_ARTISTS:
-        return metadata.album_artists
-
-    if field is MetadataField.COMPOSERS:
-        return metadata.composers
-
-    if field is MetadataField.TRACK:
-        return metadata.track
-
-    if field is MetadataField.DISC:
-        return metadata.disc
-
-    if field is MetadataField.DATE:
-        return metadata.date
-
-    if field is MetadataField.GENRES:
-        return metadata.genres
-
-    raise ValueError(f"Unsupported metadata field: {field!r}")
-
-
 def _has_semantic_value(value: FieldValue | None) -> bool:
     if value is None:
         return False
@@ -368,7 +341,7 @@ def _validate_review_source_alignment(
                 f"review read_state for {field.value} does not match the source read state"
             )
 
-        source_value = _metadata_value(source_metadata, field)
+        source_value = metadata_value(source_metadata, field)
 
         if source_read_state is FieldReadState.MISSING:
             expected_existing: FieldValue | None = None
@@ -418,7 +391,7 @@ def _resolve_value(
     source_metadata: MetadataSnapshot,
     review: FieldReviewState,
 ) -> FieldValue | None:
-    existing = _metadata_value(source_metadata, review.field)
+    existing = metadata_value(source_metadata, review.field)
 
     # Unresolved means the user has not chosen a replacement; it does not mean
     # the old value should disappear from either the tags or the rename preview.
@@ -479,11 +452,11 @@ def _metadata_changes(
     return tuple(
         MetadataChange(
             field=field,
-            old_value=_metadata_value(source, field),
-            new_value=_metadata_value(final, field),
+            old_value=metadata_value(source, field),
+            new_value=metadata_value(final, field),
         )
         for field in MetadataField
-        if _metadata_value(source, field) != _metadata_value(final, field)
+        if metadata_value(source, field) != metadata_value(final, field)
     )
 
 
@@ -496,6 +469,15 @@ def _rename_problem_severity(rename_decision: RenameDecision) -> ChangeIssueSeve
     return ChangeIssueSeverity.WARNING
 
 
+@dataclass(frozen=True)
+class _DerivedRename:
+    """Keep the explanatory preview separate from the approved filesystem change."""
+
+    preview: RenameChange | None
+    approved_change: RenameChange | None
+    issues: tuple[ChangeValidationIssue, ...]
+
+
 def _derive_rename(
     source_path: Path,
     final_metadata: MetadataSnapshot,
@@ -503,7 +485,7 @@ def _derive_rename(
     template: str,
     rename_policy: FilenameRenderPolicy,
     existing_names: tuple[str, ...],
-) -> tuple[RenameChange | None, RenameChange | None, tuple[ChangeValidationIssue, ...]]:
+) -> _DerivedRename:
     severity = _rename_problem_severity(rename_decision)
 
     try:
@@ -515,7 +497,7 @@ def _derive_rename(
             message=str(error),
         )
 
-        return None, None, (issue,)
+        return _DerivedRename(preview=None, approved_change=None, issues=(issue,))
 
     try:
         rendered_stem = render_template(template_ast, final_metadata, rename_policy)
@@ -526,7 +508,7 @@ def _derive_rename(
             message=str(error),
         )
 
-        return None, None, (issue,)
+        return _DerivedRename(preview=None, approved_change=None, issues=(issue,))
 
     if not rendered_stem.strip():
         issue = ChangeValidationIssue(
@@ -536,7 +518,7 @@ def _derive_rename(
             filename_issue_code=FilenameIssueCode.EMPTY_COMPONENT,
         )
 
-        return None, None, (issue,)
+        return _DerivedRename(preview=None, approved_change=None, issues=(issue,))
 
     # The template controls the stem; retaining the source suffix avoids making
     # a metadata rename look like an audio-format conversion.
@@ -562,12 +544,12 @@ def _derive_rename(
         )
 
     if filename_validation.sanitised_name is None:
-        return None, None, tuple(issues)
+        return _DerivedRename(preview=None, approved_change=None, issues=tuple(issues))
 
     destination_path = source_path.with_name(filename_validation.sanitised_name)
 
     if str(destination_path) == str(source_path):
-        return None, None, tuple(issues)
+        return _DerivedRename(preview=None, approved_change=None, issues=tuple(issues))
 
     preview = RenameChange(old_path=source_path, new_path=destination_path)
     collision = validate_windows_filename_collision(
@@ -595,7 +577,7 @@ def _derive_rename(
         else None
     )
 
-    return preview, rename_change, tuple(issues)
+    return _DerivedRename(preview=preview, approved_change=rename_change, issues=tuple(issues))
 
 
 _TRACK_SPECIFIC_FIELDS = frozenset(
@@ -625,6 +607,14 @@ def _derive_preflight_issues(
     issues: list[ChangeValidationIssue] = []
     changed_fields = frozenset(change.field for change in metadata_changes)
     operation_requested = bool(metadata_changes) or rename_operation_requested
+
+    if operation_requested and not validation.source_unchanged:
+        issues.append(
+            _blocking_issue(
+                ChangeIssueCode.SOURCE_CHANGED,
+                "The source file changed since scanning. Rescan and review it again.",
+            )
+        )
 
     if operation_requested and not validation.source_readable:
         issues.append(
@@ -784,7 +774,7 @@ def build_change_set(
     # including manual values and preserved local values, rather than proposals.
     final_metadata = _derive_final_metadata(source_metadata, reviews_by_field)
     metadata_changes = _metadata_changes(source_metadata, final_metadata)
-    rename_preview, rename_change, rename_issues = _derive_rename(
+    rename = _derive_rename(
         source.path,
         final_metadata,
         rename_decision,
@@ -795,16 +785,16 @@ def build_change_set(
     preflight_issues = _derive_preflight_issues(
         reviews_by_field,
         metadata_changes,
-        rename_decision is RenameDecision.APPLY_RENAME and rename_preview is not None,
+        rename_decision is RenameDecision.APPLY_RENAME and rename.preview is not None,
         validation,
     )
 
     return FileChangeSet(
         file_id=source.file_id,
         metadata_changes=metadata_changes,
-        rename_change=rename_change,
+        rename_change=rename.approved_change,
         final_metadata=final_metadata,
         rename_decision=rename_decision,
-        rename_preview=rename_preview,
-        validation=ChangeValidationResult(preflight_issues + rename_issues),
+        rename_preview=rename.preview,
+        validation=ChangeValidationResult(preflight_issues + rename.issues),
     )

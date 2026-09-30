@@ -3,12 +3,14 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 from typing import Protocol
 
 from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import LocalMediaFile, UnsupportedMediaFile
 from metadata_polisher.execution.cancellation import CancellationToken, NeverCancelledToken
 from metadata_polisher.formats.base import MediaFormatAdapter, MediaFormatError
+from metadata_polisher.infrastructure.filesystem import read_file_version
 from metadata_polisher.scanner.filename_hints import extract_filename_hints
 
 
@@ -28,6 +30,9 @@ class ScanResult:
     supported_files: tuple[LocalMediaFile, ...]
     unsupported_files: tuple[UnsupportedMediaFile, ...]
     issues: tuple[Issue, ...]
+    # Media read failures remain isolated, but an unseen directory or entry
+    # prevents this snapshot from replacing a previously reviewed library.
+    complete: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "supported_files", tuple(self.supported_files))
@@ -90,12 +95,46 @@ def scan_media(
     issues: list[Issue] = []
     supported_extensions = frozenset(extension.casefold() for extension in registry.supported_extensions)
     discovered_files: list[Path] = []
+    complete = True
 
-    for path in root.rglob("*"):
+    def discovery_failed(error: OSError, path: Path | None = None) -> None:
+        nonlocal complete
+        complete = False
+
+        if path is None:
+            path = Path(error.filename) if error.filename is not None else root
+
+        code = (
+            MediaErrorCode.PERMISSION_DENIED if isinstance(error, PermissionError)
+            else MediaErrorCode.TAG_READ_FAILED
+        )
+        issues.append(
+            Issue(
+                code=code,
+                message=f"Could not inspect {path} during the folder scan.",
+                technical_detail=f"{type(error).__name__}: {error}",
+            )
+        )
+
+    # Path.rglob() and is_file() suppress filesystem errors. Walk reports
+    # inaccessible directories, while explicit stat keeps missing or denied
+    # entries visible instead of presenting an incomplete scan as success.
+    for directory, directory_names, file_names in root.walk(on_error=discovery_failed):
         active_cancellation.raise_if_cancelled()
+        directory_names.sort(key=lambda name: (name.casefold(), name))
 
-        if path.is_file():
-            discovered_files.append(path)
+        for name in sorted(file_names, key=lambda name: (name.casefold(), name)):
+            active_cancellation.raise_if_cancelled()
+            path = directory / name
+
+            try:
+                is_file = S_ISREG(path.stat().st_mode)
+            except OSError as error:
+                discovery_failed(error, path)
+                continue
+
+            if is_file:
+                discovered_files.append(path)
 
     active_cancellation.raise_if_cancelled()
     # Filesystem enumeration order is not stable. Sort before reading so
@@ -119,6 +158,12 @@ def scan_media(
             # an extension without requiring a second scanner policy change.
             if extension in supported_extensions:
                 try:
+                    file_version = read_file_version(path)
+                except OSError as error:
+                    issues.append(_unexpected_read_issue(path, error))
+                    continue
+
+                try:
                     adapter = registry.detect(path)
                 except Exception as error:
                     issues.append(_probe_issue(path, extension, error))
@@ -133,11 +178,23 @@ def scan_media(
                 # one damaged file does not discard the rest of the scan.
                 try:
                     read_result = adapter.read(path)
+                    current_version = read_file_version(path)
                 except MediaFormatError as error:
                     issues.append(_contextualise_issue(error.issue, path))
                     continue
                 except Exception as error:
                     issues.append(_unexpected_read_issue(path, error))
+                    continue
+
+                if current_version != file_version:
+                    # The metadata and source identity must describe the same
+                    # file version, otherwise Apply would start with stale evidence.
+                    issues.append(
+                        Issue(
+                            code=MediaErrorCode.SOURCE_CHANGED,
+                            message=f"The file changed during scanning. Scan it again before reviewing: {path}.",
+                        )
+                    )
                     continue
 
                 supported_files.append(
@@ -146,6 +203,7 @@ def scan_media(
                         format_id=adapter.format_id,
                         read_result=read_result,
                         filename_hints=extract_filename_hints(path),
+                        file_version=file_version,
                     )
                 )
                 issues.extend(_contextualise_issue(issue, path) for issue in read_result.issues)
@@ -163,4 +221,5 @@ def scan_media(
         supported_files=tuple(supported_files),
         unsupported_files=tuple(unsupported_files),
         issues=tuple(issues),
+        complete=complete,
     )

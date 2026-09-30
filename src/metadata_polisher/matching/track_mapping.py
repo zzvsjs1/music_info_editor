@@ -28,11 +28,33 @@ from metadata_polisher.matching.release_scoring import (
 _ALIGNMENT_ABSOLUTE_TOLERANCE = 1e-9
 
 
-# Named tuple shapes keep the row/column helpers readable. Each pair always
-# stores the local index first and the provider index second.
-type _PairIndex = tuple[int, int]
+# Named indexes distinguish the two coordinate systems throughout alignment.
+# Ordering still compares local first, then provider: the existing tie-breaks
+# depend on precisely this lexicographic order.
+@dataclass(frozen=True, order=True, slots=True)
+class _PairIndex:
+    local_index: int
+    provider_index: int
+
+
 type _PairIndexes = tuple[_PairIndex, ...]
-type _PairGroups = tuple[_PairIndexes, ...]
+
+
+@dataclass(frozen=True)
+class _PairGroup:
+    pairs: _PairIndexes
+
+
+@dataclass(frozen=True)
+class _PairCompetition:
+    by_local: tuple[_PairGroup, ...]
+    by_provider: tuple[_PairGroup, ...]
+
+
+@dataclass(frozen=True)
+class _AlignmentResult:
+    pairs: _PairIndexes
+    ambiguous_local_indexes: frozenset[int]
 
 
 # The mapper first selects numbered anchors, then aligns the remaining
@@ -41,6 +63,48 @@ type _PairGroups = tuple[_PairIndexes, ...]
 class _NumberSource(StrEnum):
     TAG = "tag"
     FILENAME = "filename"
+
+
+@dataclass(frozen=True)
+class _TrackNumber:
+    number: int | None
+    source: _NumberSource | None
+
+
+@dataclass(frozen=True)
+class _ContentDimension:
+    evidence: MatchEvidence
+    similarity: float | None
+    supports_identity: bool = False
+    strong_contradiction: bool = False
+
+
+@dataclass(frozen=True)
+class _NumberDimension:
+    evidence: MatchEvidence
+    similarity: float | None
+    source: _NumberSource | None
+    agrees: bool | None
+    strong_contradiction: bool
+
+
+@dataclass(frozen=True)
+class _WeightedSimilarity:
+    weight: float
+    similarity: float
+
+
+@dataclass(frozen=True)
+class _SharedComparison:
+    weight: float
+    first_value: float | None
+    second_value: float | None
+
+
+@dataclass(frozen=True)
+class _WeightedDifference:
+    weight: float
+    difference: float
 
 
 @dataclass(frozen=True)
@@ -238,7 +302,7 @@ class _LazyAssessmentRow:
 @dataclass(frozen=True)
 class _AlignmentState:
     value: float
-    pairs: tuple[tuple[int, int], ...]
+    pairs: _PairIndexes
 
 
 def _typed_tuple[T](name: str, values: object, item_type: type[T]) -> tuple[T, ...]:
@@ -275,23 +339,23 @@ def _positive_integer(value: object) -> int | None:
 
 # A PRESENT track tag owns this evidence tier, even if its number is unusable.
 # A filename must not silently replace an existing tag during pair assessment.
-def _local_number(file: LocalMediaFile) -> tuple[int | None, _NumberSource | None]:
+def _local_number(file: LocalMediaFile) -> _TrackNumber:
     if file.read_result.field_states[MetadataField.TRACK] is FieldReadState.PRESENT:
-        return _positive_integer(file.read_result.metadata.track.number), _NumberSource.TAG
+        return _TrackNumber(number=_positive_integer(file.read_result.metadata.track.number), source=_NumberSource.TAG)
 
     number = _positive_integer(file.filename_hints.track_number)
 
     if number is None:
-        return None, None
+        return _TrackNumber(number=None, source=None)
 
-    return number, _NumberSource.FILENAME
+    return _TrackNumber(number=number, source=_NumberSource.FILENAME)
 
 
 def _title_dimension(
     local: LocalMediaFile,
     provider: ProviderTrack,
     policy: MatchingPolicy,
-) -> tuple[MatchEvidence, float | None, bool]:
+) -> _ContentDimension:
     local_title = effective_local_title(local)
     weight = policy.track_mapping.title_weight
     provider_titles = tuple(
@@ -301,14 +365,13 @@ def _title_dimension(
     )
 
     if local_title is None or not provider_titles:
-        return (
-            _evidence(
+        return _ContentDimension(
+            evidence=_evidence(
                 MatchReasonCode.TRACK_TITLE_UNAVAILABLE,
                 0.0,
                 "A usable local or provider track title is unavailable.",
             ),
-            None,
-            False,
+            similarity=None,
         )
 
     # Provider aliases are alternative spellings of this track. Use the best
@@ -323,14 +386,14 @@ def _title_dimension(
     exact = similarity == 1.0
     code = MatchReasonCode.TRACK_TITLE_EXACT if exact else MatchReasonCode.TRACK_TITLE_SIMILARITY
 
-    return (
-        _evidence(
+    return _ContentDimension(
+        evidence=_evidence(
             code,
             weight * similarity,
             f"Best title similarity is {similarity * 100:.1f}% across {len(provider_titles)} provider variant(s).",
         ),
-        similarity,
-        similarity >= policy.track_mapping.minimum_content_title_similarity,
+        similarity=similarity,
+        supports_identity=similarity >= policy.track_mapping.minimum_content_title_similarity,
     )
 
 
@@ -354,21 +417,19 @@ def _duration_dimension(
     local: LocalMediaFile,
     provider: ProviderTrack,
     policy: MatchingPolicy,
-) -> tuple[MatchEvidence, float | None, bool, bool]:
+) -> _ContentDimension:
     local_duration = local.read_result.stream_info.duration_seconds
     provider_duration = provider.duration_seconds
     weight = policy.track_mapping.duration_weight
 
     if local_duration is None or provider_duration is None:
-        return (
-            _evidence(
+        return _ContentDimension(
+            evidence=_evidence(
                 MatchReasonCode.TRACK_DURATION_UNAVAILABLE,
                 0.0,
                 "A local or provider duration is unavailable, so duration is unknown.",
             ),
-            None,
-            False,
-            False,
+            similarity=None,
         )
 
     delta = abs(local_duration - provider_duration)
@@ -382,15 +443,15 @@ def _duration_dimension(
     else:
         code = MatchReasonCode.TRACK_DURATION_SIMILARITY
 
-    return (
-        _evidence(
+    return _ContentDimension(
+        evidence=_evidence(
             code,
             weight * similarity,
             f"Track durations differ by {delta:.3f} seconds.",
         ),
-        similarity,
-        similarity == 1.0,
-        large_mismatch,
+        similarity=similarity,
+        supports_identity=similarity == 1.0,
+        strong_contradiction=large_mismatch,
     )
 
 
@@ -398,30 +459,30 @@ def _number_dimension(
     local: LocalMediaFile,
     provider: ProviderTrack,
     policy: MatchingPolicy,
-) -> tuple[MatchEvidence, float | None, _NumberSource | None, bool | None, bool]:
-    local_number, source = _local_number(local)
+) -> _NumberDimension:
+    local_number = _local_number(local)
     provider_number = _positive_integer(provider.track_number)
     weight = policy.track_mapping.track_number_weight
 
-    if local_number is None or provider_number is None:
-        return (
-            _evidence(
+    if local_number.number is None or provider_number is None:
+        return _NumberDimension(
+            evidence=_evidence(
                 MatchReasonCode.TRACK_NUMBER_UNAVAILABLE,
                 0.0,
                 "A usable local or provider track number is unavailable.",
             ),
-            None,
-            source,
-            None,
-            False,
+            similarity=None,
+            source=local_number.source,
+            agrees=None,
+            strong_contradiction=False,
         )
 
     # A filename agreement is discounted because filenames are only hints.
     # A conflicting real tag is a strong contradiction; a conflicting filename
     # lowers the score but does not impose that same confidence restriction.
-    agrees = local_number == provider_number
+    agrees = local_number.number == provider_number
 
-    if agrees and source is _NumberSource.TAG:
+    if agrees and local_number.source is _NumberSource.TAG:
         code = MatchReasonCode.TRACK_NUMBER_EXACT_TAG
         similarity = 1.0
     elif agrees:
@@ -431,17 +492,18 @@ def _number_dimension(
         code = MatchReasonCode.TRACK_NUMBER_CONFLICT
         similarity = 0.0
 
-    return (
-        _evidence(
+    return _NumberDimension(
+        evidence=_evidence(
             code,
             weight * similarity,
-            f"Local {source.value if source is not None else 'unknown'} number {local_number} "
+            f"Local {local_number.source.value if local_number.source is not None else 'unknown'} "
+            f"number {local_number.number} "
             f"was compared with provider number {provider_number}.",
         ),
-        similarity,
-        source,
-        agrees,
-        not agrees and source is _NumberSource.TAG,
+        similarity=similarity,
+        source=local_number.source,
+        agrees=agrees,
+        strong_contradiction=not agrees and local_number.source is _NumberSource.TAG,
     )
 
 
@@ -471,17 +533,9 @@ def _assess_pair(
     policy: MatchingPolicy,
 ) -> _PairAssessment:
     mapping_policy = policy.track_mapping
-    title_evidence, title_similarity, title_supports = _title_dimension(
-        local,
-        provider,
-        policy,
-    )
-    duration_evidence, duration_similarity, duration_supports, duration_conflicts = (
-        _duration_dimension(local, provider, policy)
-    )
-    number_evidence, number_similarity, number_source, number_agrees, number_conflicts = (
-        _number_dimension(local, provider, policy)
-    )
+    title = _title_dimension(local, provider, policy)
+    duration = _duration_dimension(local, provider, policy)
+    number = _number_dimension(local, provider, policy)
     position_similarity = _position_similarity(
         local_index,
         provider_index,
@@ -497,22 +551,22 @@ def _assess_pair(
     # None means there is no comparison, not a disagreement. Exclude absent
     # dimensions from both the earned points and the possible points. A known
     # conflict has similarity 0 and still contributes its full possible weight.
-    available: list[tuple[float, float]] = []
+    available: list[_WeightedSimilarity] = []
 
-    if title_similarity is not None:
-        available.append((mapping_policy.title_weight, title_similarity))
+    if title.similarity is not None:
+        available.append(_WeightedSimilarity(weight=mapping_policy.title_weight, similarity=title.similarity))
 
-    if duration_similarity is not None:
-        available.append((mapping_policy.duration_weight, duration_similarity))
+    if duration.similarity is not None:
+        available.append(_WeightedSimilarity(weight=mapping_policy.duration_weight, similarity=duration.similarity))
 
-    if number_similarity is not None:
-        available.append((mapping_policy.track_number_weight, number_similarity))
+    if number.similarity is not None:
+        available.append(_WeightedSimilarity(weight=mapping_policy.track_number_weight, similarity=number.similarity))
 
     # Weighted average = 100 * earned points / available points. For example,
     # title similarity 0.8 at weight 55 and exact duration at weight 20 give
     # 100 * (44 + 20) / (55 + 20), about 85.33, before adding sequence position.
-    substantive_weight = sum(weight for weight, _similarity in available)
-    substantive_contribution = sum(weight * similarity for weight, similarity in available)
+    substantive_weight = sum(item.weight for item in available)
+    substantive_contribution = sum(item.weight * item.similarity for item in available)
     substantive_score = (
         100.0 * substantive_contribution / substantive_weight
         if substantive_weight > 0.0
@@ -534,14 +588,14 @@ def _assess_pair(
         substantive_score=round(substantive_score, SCORE_DECIMAL_PLACES),
         substantive_dimension_count=len(available),
         has_substantive_evidence=bool(available),
-        strong_contradiction=duration_conflicts or number_conflicts,
-        support_dimension_count=int(title_supports) + int(duration_supports),
-        number_source=number_source,
-        number_agrees=number_agrees,
-        evidence=(title_evidence, duration_evidence, number_evidence, position_evidence),
-        title_similarity=title_similarity,
-        duration_similarity=duration_similarity,
-        number_similarity=number_similarity,
+        strong_contradiction=duration.strong_contradiction or number.strong_contradiction,
+        support_dimension_count=int(title.supports_identity) + int(duration.supports_identity),
+        number_source=number.source,
+        number_agrees=number.agrees,
+        evidence=(title.evidence, duration.evidence, number.evidence, position_evidence),
+        title_similarity=title.similarity,
+        duration_similarity=duration.similarity,
+        number_similarity=number.similarity,
     )
 
 
@@ -570,27 +624,27 @@ def _anchor_candidates(
     provider_tracks: tuple[ProviderTrack, ...],
     assessments: _AssessmentMatrix,
     policy: MatchingPolicy,
-) -> tuple[tuple[int, int], ...]:
+) -> _PairIndexes:
     local_numbers = tuple(_local_number(file) for file in local_files)
     provider_numbers = tuple(_positive_integer(track.track_number) for track in provider_tracks)
-    local_number_counts = Counter(number for number, _source in local_numbers)
+    local_number_counts = Counter(item.number for item in local_numbers)
     provider_number_counts = Counter(provider_numbers)
     provider_indexes = {number: index for index, number in enumerate(provider_numbers)}
-    candidates: list[tuple[int, int]] = []
+    candidates: list[_PairIndex] = []
 
-    for local_index, (local_number, source) in enumerate(local_numbers):
-        if local_number is None or source is None:
+    for local_index, local_number in enumerate(local_numbers):
+        if local_number.number is None or local_number.source is None:
             continue
 
         # Repeated numbers cannot identify an anchor uniquely on either side.
         # They remain available to the later sequence alignment instead.
-        if local_number_counts[local_number] != 1:
+        if local_number_counts[local_number.number] != 1:
             continue
 
-        if provider_number_counts[local_number] != 1:
+        if provider_number_counts[local_number.number] != 1:
             continue
 
-        provider_index = provider_indexes[local_number]
+        provider_index = provider_indexes[local_number.number]
         assessment = assessments[local_index][provider_index]
 
         # An anchor becomes a hard ordering boundary for every later pair.
@@ -600,12 +654,12 @@ def _anchor_candidates(
         if not _has_high_content_confidence(assessment, policy):
             continue
 
-        candidates.append((local_index, provider_index))
+        candidates.append(_PairIndex(local_index=local_index, provider_index=provider_index))
 
     return tuple(candidates)
 
 
-def _select_anchor_chain(candidates: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
+def _select_anchor_chain(candidates: _PairIndexes) -> _PairIndexes:
     if not candidates:
         return ()
 
@@ -618,18 +672,18 @@ def _select_anchor_chain(candidates: tuple[tuple[int, int], ...]) -> tuple[tuple
     # is the unique longest chain. Avoid building every shorter prefix merely
     # to rediscover it; crossing or repeated indexes still use the same solver.
     if all(
-        left[0] < right[0] and left[1] < right[1]
+        left.local_index < right.local_index and left.provider_index < right.provider_index
         for left, right in zip(ordered, ordered[1:], strict=False)
     ):
         return ordered
 
-    best_ending: list[tuple[tuple[int, int], ...]] = []
+    best_ending: list[_PairIndexes] = []
 
     for candidate in ordered:
         earlier_chains = tuple(
             chain
             for chain in best_ending
-            if chain[-1][0] < candidate[0] and chain[-1][1] < candidate[1]
+            if chain[-1].local_index < candidate.local_index and chain[-1].provider_index < candidate.provider_index
         )
         prefix = max(earlier_chains, key=lambda chain: (len(chain), tuple(reversed(chain))), default=())
         best_ending.append((*prefix, candidate))
@@ -670,15 +724,18 @@ def _clearly_preferred(
 
     mapping_policy = policy.track_mapping
     comparisons = (
-        (mapping_policy.title_weight, first.title_similarity, second.title_similarity),
-        (mapping_policy.duration_weight, first.duration_similarity, second.duration_similarity),
-        (mapping_policy.track_number_weight, first.number_similarity, second.number_similarity),
+        _SharedComparison(mapping_policy.title_weight, first.title_similarity, second.title_similarity),
+        _SharedComparison(mapping_policy.duration_weight, first.duration_similarity, second.duration_similarity),
+        _SharedComparison(mapping_policy.track_number_weight, first.number_similarity, second.number_similarity),
     )
-    shared = tuple(
-        (weight, first_value - second_value)
-        for weight, first_value, second_value in comparisons
-        if first_value is not None and second_value is not None
-    )
+    shared: list[_WeightedDifference] = []
+
+    for comparison in comparisons:
+        if comparison.first_value is not None and comparison.second_value is not None:
+            shared.append(_WeightedDifference(
+                weight=comparison.weight,
+                difference=comparison.first_value - comparison.second_value,
+            ))
 
     if not shared:
         # Disjoint evidence cannot establish which identity is better. The
@@ -689,8 +746,8 @@ def _clearly_preferred(
     # remain equal when one provider omits duration, even if that omission
     # raises its ordinary weighted score. Real shared duration differences
     # still separate repeated titles. Position never participates here.
-    shared_weight = sum(weight for weight, _difference in shared)
-    advantage = 100.0 * sum(weight * difference for weight, difference in shared) / shared_weight
+    shared_weight = sum(item.weight for item in shared)
+    advantage = 100.0 * sum(item.weight * item.difference for item in shared) / shared_weight
 
     return advantage > mapping_policy.ambiguity_margin
 
@@ -704,11 +761,11 @@ def _preferred_pair(
     # by ordinary scores would reintroduce differences caused by missing
     # dimensions, and comparing only two rows can overlook a third rival.
     for candidate in candidates:
-        assessment = assessments[candidate[0]][candidate[1]]
+        assessment = assessments[candidate.local_index][candidate.provider_index]
         alternatives = (other for other in candidates if other != candidate)
 
         if all(
-            _clearly_preferred(assessment, assessments[other[0]][other[1]], policy)
+            _clearly_preferred(assessment, assessments[other.local_index][other.provider_index], policy)
             for other in alternatives
         ):
             return candidate
@@ -720,28 +777,28 @@ def _order_compatible(first: _PairIndex, second: _PairIndex) -> bool:
     if first == second:
         return True
 
-    if first[0] == second[0] or first[1] == second[1]:
+    if first.local_index == second.local_index or first.provider_index == second.provider_index:
         return False
 
     # A pair lies before its neighbour on both sides or after it on both.
     # Equal rows/columns above would reuse a track; opposite order crosses it.
-    return (first[0] < second[0]) == (first[1] < second[1])
+    return (first.local_index < second.local_index) == (first.provider_index < second.provider_index)
 
 
 def _competition_groups(
     pairs: _PairIndexes,
-) -> tuple[_PairGroups, _PairGroups]:
+) -> _PairCompetition:
     """Index candidates once for the two directions of identity competition."""
     rows: dict[int, list[_PairIndex]] = {}
     columns: dict[int, list[_PairIndex]] = {}
 
     for pair in pairs:
-        rows.setdefault(pair[0], []).append(pair)
-        columns.setdefault(pair[1], []).append(pair)
+        rows.setdefault(pair.local_index, []).append(pair)
+        columns.setdefault(pair.provider_index, []).append(pair)
 
-    return (
-        tuple(tuple(group) for group in rows.values()),
-        tuple(tuple(group) for group in columns.values()),
+    return _PairCompetition(
+        by_local=tuple(_PairGroup(pairs=tuple(group)) for group in rows.values()),
+        by_provider=tuple(_PairGroup(pairs=tuple(group)) for group in columns.values()),
     )
 
 
@@ -754,21 +811,23 @@ def _feasible_segment_pairs(
     provider_end: int,
     policy: MatchingPolicy,
 ) -> _PairIndexes:
-    plausible = tuple(
-        (local_index, provider_index)
-        for local_index in range(local_start, local_end)
-        for provider_index in range(provider_start, provider_end)
-        if _is_eligible_pair(assessments[local_index][provider_index], policy)
-    )
-    rows, columns = _competition_groups(plausible)
-    row_preferences = {_preferred_pair(group, assessments, policy) for group in rows}
-    column_preferences = {_preferred_pair(group, assessments, policy) for group in columns}
+    candidates: list[_PairIndex] = []
+
+    for local_index in range(local_start, local_end):
+        for provider_index in range(provider_start, provider_end):
+            if _is_eligible_pair(assessments[local_index][provider_index], policy):
+                candidates.append(_PairIndex(local_index=local_index, provider_index=provider_index))
+
+    plausible = tuple(candidates)
+    competition = _competition_groups(plausible)
+    row_preferences = {_preferred_pair(group.pairs, assessments, policy) for group in competition.by_local}
+    column_preferences = {_preferred_pair(group.pairs, assessments, policy) for group in competition.by_provider}
     neighbours = tuple(
         pair
         for pair in plausible
         if pair in row_preferences
         and pair in column_preferences
-        and _has_high_content_confidence(assessments[pair[0]][pair[1]], policy)
+        and _has_high_content_confidence(assessments[pair.local_index][pair.provider_index], policy)
     )
 
     # Only mutually unique, well-supported neighbours may exclude a rival.
@@ -798,14 +857,16 @@ def _ambiguous_from_pairs(
     # two locals sharing one possible provider track are both identity ties.
     # Restricting this to the current anchor segment and supported neighbours
     # preserves valid partial mappings on either side of a known track.
-    rows, columns = _competition_groups(feasible)
+    competition = _competition_groups(feasible)
 
-    for candidates in (*rows, *columns):
+    for group in (*competition.by_local, *competition.by_provider):
+        candidates = group.pairs
+
         if len(candidates) < 2:
             continue
 
         if _preferred_pair(candidates, assessments, policy) is None:
-            ambiguous.update(local_index for local_index, _provider_index in candidates)
+            ambiguous.update(pair.local_index for pair in candidates)
 
     return frozenset(ambiguous)
 
@@ -856,7 +917,7 @@ def _align_segment(
     provider_start: int,
     provider_end: int,
     policy: MatchingPolicy,
-) -> tuple[tuple[tuple[int, int], ...], frozenset[int]]:
+) -> _AlignmentResult:
     local_count = local_end - local_start
     provider_count = provider_end - provider_start
     gap = policy.track_mapping.gap_penalty
@@ -869,12 +930,12 @@ def _align_segment(
         policy=policy,
     )
     ambiguous = _ambiguous_from_pairs(assessments, feasible, policy)
-    permitted_pairs = frozenset(pair for pair in feasible if pair[0] not in ambiguous)
+    permitted_pairs = frozenset(pair for pair in feasible if pair.local_index not in ambiguous)
 
     # With no permitted matches, every possible path only skips tracks.
     # Its private reward cannot affect the returned empty path or ambiguity.
     if not permitted_pairs:
-        return (), ambiguous
+        return _AlignmentResult(pairs=(), ambiguous_local_indexes=ambiguous)
 
     # table[i][j] describes only the first i local and first j provider tracks
     # in this segment. Row/column zero represent empty prefixes; therefore the
@@ -913,7 +974,8 @@ def _align_segment(
             )
             assessment = assessments[local_index][provider_index]
 
-            pair_is_allowed = (local_index, provider_index) in permitted_pairs
+            pair = _PairIndex(local_index=local_index, provider_index=provider_index)
+            pair_is_allowed = pair in permitted_pairs
 
             if pair_is_allowed:
                 previous = table[local_offset - 1][provider_offset - 1]
@@ -924,24 +986,24 @@ def _align_segment(
                 reward = assessment.score - policy.track_mapping.minimum_pair_score
                 pair_state = _AlignmentState(
                     value=previous.value + reward,
-                    pairs=(*previous.pairs, (local_index, provider_index)),
+                    pairs=(*previous.pairs, pair),
                 )
                 table[local_offset][provider_offset] = _better_state(*candidates, pair_state)
             else:
                 table[local_offset][provider_offset] = _better_state(*candidates)
 
-    return table[local_count][provider_count].pairs, ambiguous
+    return _AlignmentResult(pairs=table[local_count][provider_count].pairs, ambiguous_local_indexes=ambiguous)
 
 
 def _align_around_anchors(
     assessments: _AssessmentMatrix,
-    anchors: tuple[tuple[int, int], ...],
+    anchors: _PairIndexes,
     *,
     local_count: int,
     provider_count: int,
     policy: MatchingPolicy,
-) -> tuple[tuple[tuple[int, int], ...], frozenset[int]]:
-    pairs: list[tuple[int, int]] = []
+) -> _AlignmentResult:
+    pairs: list[_PairIndex] = []
     ambiguous: set[int] = set()
     previous_local = -1
     previous_provider = -1
@@ -949,25 +1011,27 @@ def _align_around_anchors(
     # Solve only the open intervals between trusted anchors, then append the
     # anchor itself. The final artificial endpoint flushes the trailing segment
     # without creating a fictitious match beyond either sequence.
-    for anchor_local, anchor_provider in (*anchors, (local_count, provider_count)):
-        segment_pairs, segment_ambiguous = _align_segment(
+    endpoint = _PairIndex(local_index=local_count, provider_index=provider_count)
+
+    for anchor in (*anchors, endpoint):
+        segment = _align_segment(
             assessments,
             local_start=previous_local + 1,
-            local_end=anchor_local,
+            local_end=anchor.local_index,
             provider_start=previous_provider + 1,
-            provider_end=anchor_provider,
+            provider_end=anchor.provider_index,
             policy=policy,
         )
-        pairs.extend(segment_pairs)
-        ambiguous.update(segment_ambiguous)
+        pairs.extend(segment.pairs)
+        ambiguous.update(segment.ambiguous_local_indexes)
 
-        if anchor_local < local_count:
-            pairs.append((anchor_local, anchor_provider))
+        if anchor.local_index < local_count:
+            pairs.append(anchor)
 
-        previous_local = anchor_local
-        previous_provider = anchor_provider
+        previous_local = anchor.local_index
+        previous_provider = anchor.provider_index
 
-    return tuple(pairs), frozenset(ambiguous)
+    return _AlignmentResult(pairs=tuple(pairs), ambiguous_local_indexes=frozenset(ambiguous))
 
 
 # Accepted pairs below HIGH, or with strong contradictions, stay reviewable.
@@ -1113,13 +1177,14 @@ def map_tracks(
     # Alignment preserves album sequence, which reliable numbering establishes
     # more accurately than path sorting such as 1.flac, 10.flac, 2.flac. Sharing
     # the scorer's order policy also keeps release and track explanations aligned.
-    locals_tuple, order_notice = order_local_track_files(locals_tuple)
+    ordered = order_local_track_files(locals_tuple)
+    locals_tuple = ordered.files
     medium = release.media[selected_medium_index]
     assessments = _build_assessment_matrix(locals_tuple, medium.tracks, policy)
     anchors = _select_anchor_chain(
         _anchor_candidates(locals_tuple, medium.tracks, assessments, policy)
     )
-    pair_indexes, ambiguous = _align_around_anchors(
+    alignment = _align_around_anchors(
         assessments,
         anchors,
         local_count=len(locals_tuple),
@@ -1132,24 +1197,24 @@ def map_tracks(
     # a list index alone is never promoted into a tag value.
     mappings = tuple(
         TrackMapping(
-            local_file_id=locals_tuple[local_index].file_id,
-            provider_track_index=provider_index,
-            track_position=medium.track_position(provider_index),
+            local_file_id=locals_tuple[pair.local_index].file_id,
+            provider_track_index=pair.provider_index,
+            track_position=medium.track_position(pair.provider_index),
             disc_position=release.disc_position(selected_medium_index),
-            score=assessments[local_index][provider_index].score,
+            score=assessments[pair.local_index][pair.provider_index].score,
             classification=_mapping_classification(
-                assessments[local_index][provider_index],
+                assessments[pair.local_index][pair.provider_index],
                 policy,
             ),
-            evidence=_mapping_evidence(assessments[local_index][provider_index]),
+            evidence=_mapping_evidence(assessments[pair.local_index][pair.provider_index]),
         )
-        for local_index, provider_index in pair_indexes
+        for pair in alignment.pairs
     )
 
     # Take each complement independently: a missing local file and an extra
     # provider bonus track are different unresolved items and both stay visible.
-    mapped_local_indexes = {local_index for local_index, _provider_index in pair_indexes}
-    mapped_provider_indexes = {provider_index for _local_index, provider_index in pair_indexes}
+    mapped_local_indexes = {pair.local_index for pair in alignment.pairs}
+    mapped_provider_indexes = {pair.provider_index for pair in alignment.pairs}
     unmatched_local = tuple(
         file.file_id
         for index, file in enumerate(locals_tuple)
@@ -1165,18 +1230,18 @@ def map_tracks(
         mappings,
         unmatched_local,
         unmatched_provider,
-        ambiguous,
+        alignment.ambiguous_local_indexes,
         listing_complete=listing_complete,
     )
 
-    if order_notice is not None:
-        evidence = (MatchEvidence(order_notice.code, 0.0, order_notice.detail), *evidence)
+    if ordered.notice is not None:
+        evidence = (MatchEvidence(ordered.notice.code, 0.0, ordered.notice.detail), *evidence)
 
     classification = classify_mapping_summary(
         mappings,
         complete=not unmatched_local and not unmatched_provider,
         listing_complete=listing_complete,
-        ambiguous=bool(ambiguous),
+        ambiguous=bool(alignment.ambiguous_local_indexes),
     )
 
     return TrackMappingResult(

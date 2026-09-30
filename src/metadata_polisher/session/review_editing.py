@@ -1,21 +1,17 @@
 """Pure human-review commands and fresh filename validation over session state."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from pathlib import Path
-from typing import cast
 
-from metadata_polisher.application.changes import ChangeValidationFacts, RenameDecision, build_change_set
+from metadata_polisher.application.changes import RenameDecision
 from metadata_polisher.application.review import (
-    build_field_review_state,
     set_clear_decision,
     set_keep_existing_decision,
     set_manual_decision,
     set_proposal_decision,
 )
-from metadata_polisher.domain.media import LocalMediaFile
-from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position
+from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position, metadata_value
 from metadata_polisher.domain.review import (
     DecisionOrigin,
     FieldConfidence,
@@ -25,16 +21,58 @@ from metadata_polisher.domain.review import (
     ReviewReasonCode,
 )
 from metadata_polisher.infrastructure.settings import RenameSettings
-from metadata_polisher.rename.template import FilenameRenderPolicy
+from metadata_polisher.session.review_history import (
+    REVIEW_UNDO_LIMIT,
+    record_review_action,
+    review_undo_targets,
+    undo_last_review_action,
+)
+from metadata_polisher.session.review_previews import (
+    ReviewFileSource,
+    complete_reviewed_files,
+    complete_reviewed_files_by_id,
+    local_reviews,
+    rebuild_changed_review_groups,
+    rebuild_reviewed_files,
+    rename_intent,
+    review_sources_by_id,
+)
 from metadata_polisher.session.state import (
     GroupState,
+    ReleaseMediumIdentity,
     ReviewedFileState,
     ReviewUndoEntry,
     ReviewUndoFile,
     SessionState,
 )
 
-REVIEW_UNDO_LIMIT = 30
+# Existing session callers keep one command import surface. Preview rebuilding
+# and Undo implementation live separately, while these exports remain the same
+# objects rather than additional forwarding functions.
+__all__ = (
+    "REVIEW_UNDO_LIMIT",
+    "AggregateValueState",
+    "AggregatedFieldReview",
+    "AggregatedValue",
+    "BatchReviewAction",
+    "BatchReviewCommand",
+    "BatchReviewOutcome",
+    "BatchReviewResult",
+    "accept_safe_additions",
+    "aggregate_review_fields",
+    "apply_batch_review",
+    "apply_field_decision",
+    "apply_rename_choices",
+    "local_reviews_after_lookup_reset",
+    "rebuild_reviewed_files",
+    "reconcile_lookup_reviews",
+    "refresh_rename_previews",
+    "regrouped_review_undo",
+    "retain_user_decision",
+    "review_undo_targets",
+    "set_rename_decision",
+    "undo_last_review_action",
+)
 
 
 class BatchReviewAction(StrEnum):
@@ -164,144 +202,6 @@ def _group_for_edit(state: SessionState, group_id: str, rename_settings: RenameS
     return group
 
 
-def _local_reviews(source: LocalMediaFile) -> ReviewedFileState:
-    reviews: list[FieldReviewState] = []
-
-    for field in MetadataField:
-        read_state = source.read_result.field_states[field]
-        value = cast(FieldValue | None, getattr(source.read_result.metadata, field.value))
-
-        # Missing, unreadable and unsupported fields have distinct review states.
-        # Preserve a readable value attached to a damaged field, but do not turn
-        # an empty tuple or Position into a fabricated existing value.
-        if (
-            read_state is FieldReadState.MISSING
-            or value in (None, (), Position())
-            or isinstance(value, str) and not value.strip()
-        ):
-            value = None
-
-        reviews.append(
-            build_field_review_state(
-                field=field,
-                read_state=read_state,
-                existing_value=value,
-                proposals=(),
-            )
-        )
-
-    return ReviewedFileState(source.file_id, reviews=tuple(reviews))
-
-
-def _complete_reviewed_files(group: GroupState) -> tuple[ReviewedFileState, ...]:
-    existing = {item.file_id: item for item in group.reviewed_files}
-
-    return tuple(
-        existing[source.file_id]
-        if source.file_id in existing and existing[source.file_id].reviews
-        else _local_reviews(source)
-        for source in group.group.files
-    )
-
-
-def rebuild_reviewed_files(
-    state: SessionState,
-    group: GroupState,
-    reviewed_files: Sequence[ReviewedFileState],
-    rename_settings: RenameSettings,
-    *,
-    rename_decisions: Mapping[str, RenameDecision] | None = None,
-) -> tuple[ReviewedFileState, ...]:
-    """Derive every preview, then check source and planned sibling destinations.
-
-    A changed title can introduce or remove a collision with a different file's
-    requested rename. Two passes ensure that both files use the same current
-    preview set and that old blockers are never copied into a fresh ChangeSet.
-    Filesystem facts are checked by Apply preflight; this pure preview uses the
-    directory entries already known to the session.
-    """
-    sources = {source.file_id: source for source in group.group.files}
-    known_paths = tuple(source.path for item in state.groups for source in item.group.files) + tuple(
-        source.path for source in state.unsupported_files
-    )
-    policy = FilenameRenderPolicy(
-        minimum_track_digits=rename_settings.minimum_track_digits,
-        minimum_disc_digits=rename_settings.minimum_disc_digits,
-    )
-    decisions = rename_decisions or {}
-    # First derive each filename without sibling destinations. This creates the
-    # complete set needed to recognise two files requesting the same new name.
-    preliminary: list[ReviewedFileState] = []
-
-    for reviewed in reviewed_files:
-        decision = decisions.get(
-            reviewed.file_id,
-            reviewed.change_set.rename_decision
-            if reviewed.change_set is not None
-            else RenameDecision.KEEP_FILENAME,
-        )
-
-        if not rename_settings.enabled:
-            decision = RenameDecision.KEEP_FILENAME
-
-        source = sources[reviewed.file_id]
-        changes = build_change_set(
-            source,
-            reviewed.reviews,
-            decision,
-            template=rename_settings.template,
-            rename_policy=policy,
-            validation=ChangeValidationFacts(track_mapping_resolved=reviewed.track_mapping_resolved),
-        )
-        preliminary.append(replace(reviewed, change_set=changes))
-
-    planned_paths: list[tuple[str, Path]] = []
-    other_reviews = tuple(
-        reviewed
-        for other in state.groups
-        if other.group.group_id != group.group.group_id
-        for reviewed in other.reviewed_files
-    )
-
-    for reviewed in (*preliminary, *other_reviews):
-        planned_changes = reviewed.change_set
-
-        if (
-            planned_changes is not None
-            and planned_changes.rename_decision is RenameDecision.APPLY_RENAME
-            and planned_changes.rename_preview is not None
-        ):
-            planned_paths.append((reviewed.file_id, planned_changes.rename_preview.new_path))
-
-    # Now validate against original names and every other included preview. Do
-    # not reserve this file's own preview against itself, which would always collide.
-    rebuilt: list[ReviewedFileState] = []
-
-    for reviewed in preliminary:
-        source = sources[reviewed.file_id]
-        preliminary_changes = reviewed.change_set
-        assert preliminary_changes is not None
-        existing_names = tuple(path.name for path in known_paths if path.parent == source.path.parent) + tuple(
-            path.name
-            for file_id, path in planned_paths
-            if file_id != reviewed.file_id and path.parent == source.path.parent
-        )
-        validated = build_change_set(
-            source,
-            reviewed.reviews,
-            preliminary_changes.rename_decision,
-            template=rename_settings.template,
-            rename_policy=policy,
-            validation=ChangeValidationFacts(
-                track_mapping_resolved=reviewed.track_mapping_resolved,
-                existing_names=existing_names,
-            ),
-        )
-        rebuilt.append(replace(reviewed, change_set=validated))
-
-    return tuple(rebuilt)
-
-
 def _install_reviews(
     state: SessionState,
     group: GroupState,
@@ -322,37 +222,7 @@ def _install_reviews(
         revision=state.revision + 1,
     )
 
-    return _record_review_action(state, updated)
-
-
-def _rename_intent(reviewed: ReviewedFileState) -> RenameDecision:
-    return reviewed.change_set.rename_decision if reviewed.change_set is not None else RenameDecision.KEEP_FILENAME
-
-
-def _record_review_action(before: SessionState, after: SessionState) -> SessionState:
-    """Store one action after the complete transform, including a whole batch."""
-    previous = {
-        item.file_id: item for group in before.groups for item in _complete_reviewed_files(group)
-    }
-    sources = {source.file_id: source for group in before.groups for source in group.group.files}
-    changed = tuple(
-        ReviewUndoFile(sources[item.file_id], previous[item.file_id], item)
-        for group in after.groups for item in group.reviewed_files
-        if item.file_id in previous
-        and (
-            item.reviews != previous[item.file_id].reviews
-            or _rename_intent(item) is not _rename_intent(previous[item.file_id])
-        )
-    )
-
-    if not changed:
-        return before
-
-    # One user action creates one undo entry even if it changes many files.
-    # Bound memory use by retaining only the most recent review actions.
-    history = (*before.review_undo, ReviewUndoEntry(changed))[-REVIEW_UNDO_LIMIT:]
-
-    return replace(after, review_undo=history)
+    return record_review_action(state, updated)
 
 
 def retain_user_decision(
@@ -409,19 +279,63 @@ def local_reviews_after_lookup_reset(
 
     for old in group.reviewed_files:
         if not any(review.decision_origin is DecisionOrigin.USER for review in old.reviews) and (
-            _rename_intent(old) is RenameDecision.KEEP_FILENAME
+            rename_intent(old) is RenameDecision.KEEP_FILENAME
         ):
             continue
 
-        fresh = _local_reviews(sources[old.file_id])
-        old_fields = {review.field: review for review in old.reviews}
-        reviews = tuple(retain_user_decision(
-            old_fields[review.field], review, candidate_dependency_unchanged=False,
-        ) for review in fresh.reviews)
-        retained.append(replace(fresh, reviews=reviews))
-        rename_decisions[old.file_id] = _rename_intent(old)
+        fresh = local_reviews(sources[old.file_id])
+        retained.append(_retain_local_fields(fresh, old))
+        rename_decisions[old.file_id] = rename_intent(old)
 
     return rebuild_reviewed_files(state, group, retained, rename_settings, rename_decisions=rename_decisions)
+
+
+def _retain_local_fields(fresh: ReviewedFileState, previous: ReviewedFileState) -> ReviewedFileState:
+    """Project independent choices onto local evidence after a lookup is reset."""
+    old_fields = {review.field: review for review in previous.reviews}
+    reviews: list[FieldReviewState] = []
+
+    for review in fresh.reviews:
+        retained = retain_user_decision(
+            old_fields[review.field], review, candidate_dependency_unchanged=False,
+        )
+        reviews.append(retained)
+
+    return replace(fresh, reviews=tuple(reviews))
+
+
+def _has_independent_field_change(item: ReviewUndoFile) -> bool:
+    before_fields = {review.field: review for review in item.before.reviews}
+    after_fields = {review.field: review for review in item.after.reviews}
+    independent = {FieldDecisionKind.KEEP_EXISTING, FieldDecisionKind.USE_MANUAL, FieldDecisionKind.CLEAR}
+
+    for field, before in before_fields.items():
+        after = after_fields[field]
+
+        if before == after:
+            continue
+
+        for review in (before, after):
+            if review.decision_origin is DecisionOrigin.USER and review.decision in independent:
+                return True
+
+    return False
+
+
+def _project_local_history_review(
+    state: SessionState,
+    located: ReviewFileSource,
+    fresh: ReviewedFileState,
+    previous: ReviewedFileState,
+    rename_settings: RenameSettings,
+) -> ReviewedFileState:
+    retained = _retain_local_fields(fresh, previous)
+    rebuilt = rebuild_reviewed_files(
+        state, located.group, (retained,), rename_settings,
+        rename_decisions={located.source.file_id: rename_intent(previous)},
+    )
+
+    return rebuilt[0]
 
 
 def regrouped_review_undo(
@@ -433,8 +347,7 @@ def regrouped_review_undo(
     ID. Rebuild both sides against local metadata so Undo cannot resurrect an old
     release, proposal or mapping. Candidate-only actions have nothing to restore.
     """
-    sources = {source.file_id: (group, source) for group in state.groups for source in group.group.files}
-    independent = {FieldDecisionKind.KEEP_EXISTING, FieldDecisionKind.USE_MANUAL, FieldDecisionKind.CLEAR}
+    sources = review_sources_by_id(state)
     history = []
 
     for entry in state.review_undo:
@@ -449,36 +362,16 @@ def regrouped_review_undo(
 
             located = sources.get(file_id)
 
-            if located is None or located[1] != item.source:
+            if located is None or located.source != item.source:
                 continue
 
-            before_fields = {review.field: review for review in item.before.reviews}
-            after_fields = {review.field: review for review in item.after.reviews}
-            local_changes = any(
-                before_fields[field] != after_fields[field]
-                and any(review.decision_origin is DecisionOrigin.USER and review.decision in independent
-                        for review in (before_fields[field], after_fields[field]))
-                for field in before_fields
-            )
-
-            if not local_changes and _rename_intent(item.before) is _rename_intent(item.after):
+            if not _has_independent_field_change(item) and rename_intent(item.before) is rename_intent(item.after):
                 continue
 
-            group, source = located
-            fresh = _local_reviews(source)
-            projected = []
-
-            for previous in (item.before, item.after):
-                old_fields = {review.field: review for review in previous.reviews}
-                reviews = tuple(retain_user_decision(
-                    old_fields[review.field], review, candidate_dependency_unchanged=False,
-                ) for review in fresh.reviews)
-                projected.append(rebuild_reviewed_files(
-                    state, group, (replace(fresh, reviews=reviews),), rename_settings,
-                    rename_decisions={file_id: _rename_intent(previous)},
-                )[0])
-
-            retained.append(ReviewUndoFile(source, projected[0], projected[1]))
+            fresh = local_reviews(located.source)
+            before = _project_local_history_review(state, located, fresh, item.before, rename_settings)
+            after = _project_local_history_review(state, located, fresh, item.after, rename_settings)
+            retained.append(ReviewUndoFile(source=located.source, before=before, after=after))
 
         if retained:
             history.append(ReviewUndoEntry(tuple(retained)))
@@ -510,18 +403,22 @@ def reconcile_lookup_reviews(
             continue
 
         old_fields = {review.field: review for review in old.reviews}
-        reviews = tuple(
-            retain_user_decision(
-                old_fields[review.field], review,
-                candidate_dependency_unchanged=(
-                    same_release and (review.field not in _TRACK_FIELDS
-                                      or old_tracks.get(reviewed.file_id) == new_tracks.get(reviewed.file_id))
-                ),
-            ) if review.field in old_fields else review
-            for review in reviewed.reviews
-        )
-        retained.append(replace(reviewed, reviews=reviews, change_set=None))
-        renames[reviewed.file_id] = _rename_intent(old)
+        reviews = []
+        same_track = old_tracks.get(reviewed.file_id) == new_tracks.get(reviewed.file_id)
+
+        for review in reviewed.reviews:
+            previous_review = old_fields.get(review.field)
+
+            if previous_review is not None:
+                dependency_unchanged = same_release and (review.field not in _TRACK_FIELDS or same_track)
+                review = retain_user_decision(
+                    previous_review, review, candidate_dependency_unchanged=dependency_unchanged,
+                )
+
+            reviews.append(review)
+
+        retained.append(replace(reviewed, reviews=tuple(reviews), change_set=None))
+        renames[reviewed.file_id] = rename_intent(old)
 
     if not old_files:
         return fresh
@@ -578,21 +475,22 @@ def apply_field_decision(
     if file_id not in {source.file_id for source in group.group.files}:
         raise ValueError("The selected file no longer belongs to this group.")
 
-    revised = tuple(
-        replace(
-            reviewed,
-            reviews=tuple(
-                _choose_field_decision(review, decision, manual_value, proposal_index)
-                if review.field is field
-                else review
-                for review in reviewed.reviews
-            ),
-            change_set=None,
-        )
-        if reviewed.file_id == file_id
-        else reviewed
-        for reviewed in _complete_reviewed_files(group)
-    )
+    revised: list[ReviewedFileState] = []
+
+    for reviewed in complete_reviewed_files(group):
+        if reviewed.file_id != file_id:
+            revised.append(reviewed)
+            continue
+
+        reviews: list[FieldReviewState] = []
+
+        for review in reviewed.reviews:
+            if review.field is field:
+                review = _choose_field_decision(review, decision, manual_value, proposal_index)
+
+            reviews.append(review)
+
+        revised.append(replace(reviewed, reviews=tuple(reviews), change_set=None))
     rename_decisions = {
         reviewed.file_id: reviewed.change_set.rename_decision
         for reviewed in group.reviewed_files
@@ -628,7 +526,7 @@ def set_rename_decision(
         raise ValueError("Enable filename renaming in Settings before accepting filename changes.")
 
     rebuilt = rebuild_reviewed_files(
-        state, group, _complete_reviewed_files(group), rename_settings,
+        state, group, complete_reviewed_files(group), rename_settings,
         rename_decisions=dict.fromkeys(file_ids, decision),
     )
 
@@ -640,7 +538,7 @@ def accept_safe_additions(state: SessionState, group_id: str, rename_settings: R
     group = _group_for_edit(state, group_id, rename_settings)
     revised: list[ReviewedFileState] = []
 
-    for reviewed in _complete_reviewed_files(group):
+    for reviewed in complete_reviewed_files(group):
         reviews = tuple(
             set_proposal_decision(review, review.proposals[0])
             if _is_safe_addition(review)
@@ -666,8 +564,14 @@ def refresh_rename_previews(state: SessionState, rename_settings: RenameSettings
     if state.active_operation is not None:
         raise ValueError("Wait for the current operation before changing filename settings.")
 
-    affected = {group.group.group_id for group in state.groups
-                if not group.requires_rescan and any(item.reviews for item in group.reviewed_files)}
+    affected: set[str] = set()
+
+    for group in state.groups:
+        if group.requires_rescan:
+            continue
+
+        if any(item.reviews for item in group.reviewed_files):
+            affected.add(group.group.group_id)
 
     if not affected:
         return state
@@ -688,16 +592,20 @@ def refresh_rename_previews(state: SessionState, rename_settings: RenameSettings
                 staged, group, tuple(item for item in group.reviewed_files if item.reviews), rename_settings,
             )
             by_id = {item.file_id: item for item in rebuilt}
-            groups.append(replace(group, selected_metadata=None, reviewed_files=tuple(
-                by_id.get(item.file_id, item) for item in group.reviewed_files
-            )))
+            reviewed_files = tuple(by_id.get(item.file_id, item) for item in group.reviewed_files)
+            groups.append(replace(group, selected_metadata=None, reviewed_files=reviewed_files))
 
         staged = replace(staged, groups=tuple(groups))
 
-    return replace(staged, revision=state.revision + 1, groups=tuple(
-        replace(group, revision=group.revision + 1) if group.group.group_id in affected else group
-        for group in staged.groups
-    ))
+    groups = []
+
+    for group in staged.groups:
+        if group.group.group_id in affected:
+            group = replace(group, revision=group.revision + 1)
+
+        groups.append(group)
+
+    return replace(staged, revision=state.revision + 1, groups=tuple(groups))
 
 
 def _is_safe_addition(review: FieldReviewState) -> bool:
@@ -731,7 +639,7 @@ def _batch_field_decision(review: FieldReviewState, command: BatchReviewCommand)
 
 
 def _position_scope_blocked(
-    command: BatchReviewCommand, field: MetadataField, selected: tuple[tuple[GroupState, LocalMediaFile], ...],
+    command: BatchReviewCommand, field: MetadataField, selected: tuple[ReviewFileSource, ...],
 ) -> bool:
     if command.action is not BatchReviewAction.SET_COMMON_VALUE or len(selected) < 2:
         return False
@@ -744,14 +652,27 @@ def _position_scope_blocked(
     if field is not MetadataField.DISC:
         return False
 
-    disc_numbers = {source.read_result.metadata.disc.number for _, source in selected
-                    if source.read_result.metadata.disc.number is not None}
-    media = {
-        group.selected_release.identity if group.selected_release else (group.group.group_id,)
-        for group, _ in selected
-    }
+    disc_numbers: set[int] = set()
+    selected_media: set[ReleaseMediumIdentity] = set()
+    local_groups: set[str] = set()
 
-    return len(disc_numbers) > 1 or len(media) > 1
+    for located in selected:
+        number = located.source.read_result.metadata.disc.number
+
+        if number is not None:
+            disc_numbers.add(number)
+
+        selection = located.group.selected_release
+
+        if selection is None:
+            local_groups.add(located.group.group.group_id)
+        else:
+            selected_media.add(selection.identity)
+
+    # A local-only group and a catalogue medium are distinct scope identities.
+    # Counting their separate sets retains that rule without mixing two tuple
+    # shapes or relying on positional unpacking to discover their meaning.
+    return len(disc_numbers) > 1 or len(selected_media) + len(local_groups) > 1
 
 
 def apply_batch_review(
@@ -772,24 +693,24 @@ def apply_batch_review(
     if command.expected_revision != state.revision:
         raise ValueError("The review revision changed; capture the current selection again.")
 
-    indexed = {source.file_id: (group, source) for group in state.groups for source in group.group.files}
+    indexed = review_sources_by_id(state)
 
     if not set(command.file_ids).issubset(indexed):
         raise ValueError("A selected file no longer belongs to this library.")
 
     selected = tuple(indexed[file_id] for file_id in command.file_ids)
-    cross_group = len({group.group.group_id for group, _ in selected}) > 1
+    cross_group = len({located.group.group.group_id for located in selected}) > 1
     # Record each file/field outcome separately. A blocked composer choice need
     # not hide a valid album edit, and these are review changes, not disk writes.
     affected: list[BatchReviewOutcome] = []
     skipped: list[BatchReviewOutcome] = []
     blocked: list[BatchReviewOutcome] = []
-    reviews = {item.file_id: item for group in state.groups for item in _complete_reviewed_files(group)}
-    rename_decisions = {file_id: _rename_intent(review) for file_id, review in reviews.items()}
+    reviews = complete_reviewed_files_by_id(state)
+    rename_decisions = {file_id: rename_intent(review) for file_id, review in reviews.items()}
     changed_groups: set[str] = set()
 
     for file_id in command.file_ids:
-        group, _source = indexed[file_id]
+        group = indexed[file_id].group
         fields: tuple[MetadataField | None, ...] = (None,) if command.action in _RENAME_ACTIONS else command.fields
 
         for field in fields:
@@ -860,34 +781,33 @@ def apply_batch_review(
             changed_groups.add(group.group.group_id)
 
     if not affected:
-        return BatchReviewResult(state, (), tuple(skipped), tuple(blocked))
+        return BatchReviewResult(state=state, skipped=tuple(skipped), blocked=tuple(blocked))
 
-    staged = replace(state, groups=tuple(
-        replace(
-            group, selected_metadata=None,
-            reviewed_files=tuple(reviews[source.file_id] for source in group.group.files),
-        )
-        if group.group.group_id in changed_groups else group
-        for group in state.groups
-    ))
+    groups: list[GroupState] = []
 
-    # Stage all decisions before deriving sibling collisions. Two passes make
-    # cross-group destinations independent of the ordering of selected files.
-    for _pass in range(2):
-        staged = replace(staged, groups=tuple(
-            replace(group, reviewed_files=rebuild_reviewed_files(
-                staged, group, group.reviewed_files, rename_settings, rename_decisions=rename_decisions,
-            )) if group.group.group_id in changed_groups else group
-            for group in staged.groups
-        ))
+    for group in state.groups:
+        if group.group.group_id in changed_groups:
+            reviewed_files = tuple(reviews[source.file_id] for source in group.group.files)
+            group = replace(group, selected_metadata=None, reviewed_files=reviewed_files)
 
-    staged = replace(staged, revision=state.revision + 1, groups=tuple(
-        replace(group, revision=group.revision + 1) if group.group.group_id in changed_groups else group
-        for group in staged.groups
-    ))
-    updated = _record_review_action(state, staged)
+        groups.append(group)
 
-    return BatchReviewResult(updated, tuple(affected), tuple(skipped), tuple(blocked))
+    staged = replace(state, groups=tuple(groups))
+    staged = rebuild_changed_review_groups(
+        staged, changed_groups, rename_settings, rename_decisions=rename_decisions,
+    )
+    groups = []
+
+    for group in staged.groups:
+        if group.group.group_id in changed_groups:
+            group = replace(group, revision=group.revision + 1)
+
+        groups.append(group)
+
+    staged = replace(staged, revision=state.revision + 1, groups=tuple(groups))
+    updated = record_review_action(state, staged)
+
+    return BatchReviewResult(state=updated, affected=tuple(affected), skipped=tuple(skipped), blocked=tuple(blocked))
 
 
 def apply_rename_choices(
@@ -904,19 +824,21 @@ def apply_rename_choices(
 
     # Clear old rename intent before calculating new sibling destinations.
     # Intermediate undo entries are replaced with one net action below.
-    for ids, action in ((keep_ids, BatchReviewAction.KEEP_FILENAMES),
-                        (include_ids, BatchReviewAction.INCLUDE_RENAMES)):
+    for action in (BatchReviewAction.KEEP_FILENAMES, BatchReviewAction.INCLUDE_RENAMES):
+        ids = keep_ids if action is BatchReviewAction.KEEP_FILENAMES else include_ids
+
         if not ids:
             continue
 
-        result = apply_batch_review(staged, BatchReviewCommand(ids, (), staged.revision, action), rename_settings)
+        command = BatchReviewCommand(file_ids=ids, fields=(), expected_revision=staged.revision, action=action)
+        result = apply_batch_review(staged, command, rename_settings)
         staged = result.state
         affected.extend(result.affected)
         skipped.extend(result.skipped)
         blocked.extend(result.blocked)
 
-    staged = _record_review_action(state, replace(staged, review_undo=state.review_undo))
-    return BatchReviewResult(staged, tuple(affected), tuple(skipped), tuple(blocked))
+    staged = record_review_action(state, replace(staged, review_undo=state.review_undo))
+    return BatchReviewResult(state=staged, affected=tuple(affected), skipped=tuple(skipped), blocked=tuple(blocked))
 
 
 def _value_state(value: FieldValue | None, read_state: FieldReadState | None = None) -> AggregatedValue:
@@ -940,6 +862,29 @@ def _aggregate(values: tuple[AggregatedValue, ...]) -> AggregatedValue:
     return first if all(value == first for value in values) else AggregatedValue(AggregateValueState.MIXED)
 
 
+def _final_aggregate_value(reviewed: ReviewedFileState, review: FieldReviewState) -> AggregatedValue:
+    if review.decision is FieldDecisionKind.CLEAR:
+        return AggregatedValue(AggregateValueState.EMPTY)
+
+    if reviewed.change_set is not None and review.decision in {
+        FieldDecisionKind.USE_MANUAL, FieldDecisionKind.USE_PROPOSAL,
+    }:
+        # A position proposal can supply only a number or only a total. The
+        # ChangeSet merges the other local component, so display that actual
+        # final value rather than the incomplete input that produced it.
+        final_value = metadata_value(reviewed.change_set.final_metadata, review.field)
+
+        return _value_state(final_value)
+
+    if review.decision is FieldDecisionKind.USE_MANUAL:
+        return _value_state(review.manual_value)
+
+    if review.decision is FieldDecisionKind.USE_PROPOSAL and review.selected_proposal is not None:
+        return _value_state(review.selected_proposal.value)
+
+    return _value_state(review.existing_value, review.read_state)
+
+
 def aggregate_review_fields(
     state: SessionState, file_ids: Sequence[str], fields: Sequence[MetadataField],
 ) -> tuple[AggregatedFieldReview, ...]:
@@ -949,7 +894,7 @@ def aggregate_review_fields(
     if not ids or len(set(ids)) != len(ids):
         raise ValueError("Choose a non-empty selection of unique files.")
 
-    reviews = {item.file_id: item for group in state.groups for item in _complete_reviewed_files(group)}
+    reviews = complete_reviewed_files_by_id(state)
 
     if not set(ids).issubset(reviews):
         raise ValueError("Every selected file must still belong to this library.")
@@ -960,139 +905,23 @@ def aggregate_review_fields(
         if not isinstance(field, MetadataField):
             raise TypeError("fields must contain MetadataField values")
 
-        values = tuple(next(review for review in reviews[file_id].reviews if review.field is field) for file_id in ids)
-        final = []
+        existing: list[AggregatedValue] = []
+        proposed: list[AggregatedValue] = []
+        final: list[AggregatedValue] = []
 
-        for file_id, review in zip(ids, values, strict=True):
-            changes = reviews[file_id].change_set
-
-            if review.decision is FieldDecisionKind.CLEAR:
-                final.append(AggregatedValue(AggregateValueState.EMPTY))
-            elif changes is not None and review.decision in {
-                FieldDecisionKind.USE_MANUAL, FieldDecisionKind.USE_PROPOSAL,
-            }:
-                # Position proposals can supply only a number or only a total.
-                # The ChangeSet retains the other local component; display that
-                # actual final value rather than the incomplete candidate input.
-                final.append(_value_state(cast(FieldValue | None, getattr(changes.final_metadata, field.value))))
-            elif review.decision is FieldDecisionKind.USE_MANUAL:
-                final.append(_value_state(review.manual_value))
-            elif review.decision is FieldDecisionKind.USE_PROPOSAL and review.selected_proposal is not None:
-                final.append(_value_state(review.selected_proposal.value))
-            else:
-                final.append(_value_state(review.existing_value, review.read_state))
+        for file_id in ids:
+            reviewed = reviews[file_id]
+            review = next(item for item in reviewed.reviews if item.field is field)
+            proposal = review.proposals[0].value if review.proposals else None
+            existing.append(_value_state(review.existing_value, review.read_state))
+            proposed.append(_value_state(proposal))
+            final.append(_final_aggregate_value(reviewed, review))
 
         rows.append(AggregatedFieldReview(
-            field, _aggregate(tuple(_value_state(review.existing_value, review.read_state) for review in values)),
-            _aggregate(tuple(
-                _value_state(review.proposals[0].value if review.proposals else None) for review in values
-            )),
-            _aggregate(tuple(final)),
+            field=field,
+            existing=_aggregate(tuple(existing)),
+            proposed=_aggregate(tuple(proposed)),
+            final=_aggregate(tuple(final)),
         ))
 
     return tuple(rows)
-
-
-def _next_review_undo_action(
-    state: SessionState,
-) -> tuple[tuple[ReviewUndoEntry, ...], tuple[ReviewUndoFile, ...]]:
-    """Find the newest usable action and the history that will remain after it."""
-    sources = {source.file_id: (group, source) for group in state.groups for source in group.group.files}
-    current = {item.file_id: item for group in state.groups for item in group.reviewed_files}
-    history = list(state.review_undo)
-
-    # UI availability and Undo must use identical source/evidence checks. A
-    # wholly stale action is skipped; untouched members of a batch remain usable.
-    while history:
-        entry = history.pop()
-        usable = []
-
-        for item in entry.files:
-            file_id = item.source.file_id
-            located = sources.get(file_id)
-            live = current.get(file_id)
-
-            if located is None or live is None or located[0].requires_rescan or located[1] != item.source:
-                continue
-
-            before_fields = {review.field: review for review in item.before.reviews}
-            after_fields = {review.field: review for review in item.after.reviews}
-            live_fields = {review.field: review for review in live.reviews}
-            changed_fields = {field for field in before_fields if before_fields[field] != after_fields[field]}
-            rename_changed = _rename_intent(item.before) is not _rename_intent(item.after)
-
-            # Undo is valid only while the touched fields still have this action's
-            # output. Otherwise restoring them could overwrite a later decision.
-            if any(live_fields.get(field) != after_fields[field] for field in changed_fields):
-                continue
-
-            if rename_changed and _rename_intent(live) is not _rename_intent(item.after):
-                continue
-
-            usable.append(item)
-
-        if usable:
-            return tuple(history), tuple(usable)
-
-    return (), ()
-
-
-def review_undo_targets(state: SessionState) -> tuple[ReviewUndoFile, ...]:
-    """Describe precisely what Undo can restore, independently of UI selection."""
-    if state.active_operation is not None:
-        return ()
-
-    return _next_review_undo_action(state)[1]
-
-
-def undo_last_review_action(state: SessionState, rename_settings: RenameSettings) -> SessionState:
-    """Undo one valid review action, without restoring stale or already-written files."""
-    if state.active_operation is not None:
-        raise ValueError("Wait for the current operation before undoing review decisions.")
-
-    if not state.review_undo:
-        return state
-
-    history, targets = _next_review_undo_action(state)
-
-    if not targets:
-        return replace(state, review_undo=history)
-
-    sources = {source.file_id: (group, source) for group in state.groups for source in group.group.files}
-    current = {item.file_id: item for group in state.groups for item in group.reviewed_files}
-    revised: dict[str, ReviewedFileState] = {}
-    renames: dict[str, RenameDecision] = {}
-
-    for item in targets:
-        file_id = item.source.file_id
-        live = current[file_id]
-        before_fields = {review.field: review for review in item.before.reviews}
-        after_fields = {review.field: review for review in item.after.reviews}
-        changed_fields = {field for field in before_fields if before_fields[field] != after_fields[field]}
-        rename_changed = _rename_intent(item.before) is not _rename_intent(item.after)
-
-        # Restore only the fields changed by this action so later unrelated
-        # review choices and current filename validation remain intact.
-        revised[file_id] = replace(live, change_set=None, reviews=tuple(
-            before_fields[review.field] if review.field in changed_fields else review for review in live.reviews
-        ))
-        renames[file_id] = _rename_intent(item.before) if rename_changed else _rename_intent(live)
-
-    changed_groups = {sources[file_id][0].group.group_id for file_id in revised}
-    staged = replace(state, review_undo=tuple(history), groups=tuple(
-        replace(group, selected_metadata=None, reviewed_files=tuple(revised.get(item.file_id, item)
-                                                                  for item in group.reviewed_files))
-        if group.group.group_id in changed_groups else group for group in state.groups
-    ))
-
-    for _pass in range(2):
-        staged = replace(staged, groups=tuple(
-            replace(group, reviewed_files=rebuild_reviewed_files(
-                staged, group, group.reviewed_files, rename_settings, rename_decisions=renames,
-            )) if group.group.group_id in changed_groups else group for group in staged.groups
-        ))
-
-    return replace(staged, revision=state.revision + 1, groups=tuple(
-        replace(group, revision=group.revision + 1) if group.group.group_id in changed_groups else group
-        for group in staged.groups
-    ))

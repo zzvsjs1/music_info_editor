@@ -85,6 +85,11 @@ class MediaReadResult:
         object.__setattr__(self, "issues", tuple(self.issues))
 
 
+# Device, file identity, size and nanosecond timestamps form a cheap local
+# version. This detects normal external edits without rereading audio payloads.
+type FileVersion = tuple[int, int, int, int, int]
+
+
 @dataclass(frozen=True)
 class LocalMediaFile:
     """One supported local file and all evidence gathered without provider lookup."""
@@ -94,6 +99,9 @@ class LocalMediaFile:
     read_result: MediaReadResult
     filename_hints: FilenameHints = field(default_factory=FilenameHints)
     file_id: str = ""
+    # Real scans capture this version around their metadata read. Synthetic
+    # sessions may omit it because their invented paths have no filesystem state.
+    file_version: FileVersion | None = None
 
     def __post_init__(self) -> None:
         if not self.file_id:

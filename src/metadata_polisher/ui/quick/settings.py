@@ -24,7 +24,7 @@ from metadata_polisher.providers.base import RequestContext
 from metadata_polisher.providers.catalogue import provider_label, provider_summary
 from metadata_polisher.providers.network import describe_network_route, validate_network_settings
 from metadata_polisher.rename.completion import template_completion
-from metadata_polisher.rename.template import TemplateField, parse_template
+from metadata_polisher.rename.template import FilenameRenderPolicy, TemplateField, parse_template
 from metadata_polisher.session.lookup_editing import refresh_inherited_language
 from metadata_polisher.session.review_editing import refresh_rename_previews
 from metadata_polisher.session.state import OperationKind, SessionState
@@ -94,6 +94,7 @@ class QuickSettings(QObject):
         self._password = ""
         self._credential_snapshot = CredentialSnapshot(0, None)
         self._error = ""
+        self._field_errors: dict[str, str] = {}
         self._test_status = "Not tested in this dialogue."
         self._test_operation: str | None = None
         self._test_provider: str | None = None
@@ -159,6 +160,7 @@ class QuickSettings(QObject):
         list, lambda self: [{"name": name, "path": path} for name, path in sorted(self._tools.items())], notify=changed
     )
     error = Property(str, lambda self: self._error, notify=changed)
+    fieldErrors = Property("QVariantMap", lambda self: dict(self._field_errors), notify=changed)  # type: ignore[arg-type]
     providerOptions = Property(list, _provider_options, notify=changed)
     routeOptions = Property(list, _route_options, notify=changed)
     providerSummary = Property(str, lambda self: provider_summary(self._draft["providerId"]), notify=changed)
@@ -207,6 +209,7 @@ class QuickSettings(QObject):
         self._load_draft(self._original)
         self._install_credentials(self._host.credentials.snapshot())
         self._error = ""
+        self._field_errors = {}
         self._opened = True
         self.changed.emit()
         return True
@@ -227,10 +230,42 @@ class QuickSettings(QObject):
             return
 
         self._draft[name] = cast(str | int | bool | None, value)
-        self._error = ""
+
+        # Editing a field retires only its own validation result. Conditional
+        # controls also recheck their dependent fields, so disabled preferences
+        # cannot retain a blocker that no longer applies. Untouched fields wait
+        # for focus loss or Save, and a disk/session failure remains visible.
+        related = {
+            "backupEnabled": ("backupDirectory",),
+            "networkMode": ("networkMode", "proxyHost", "proxyPort"),
+        }.get(name, (name,))
+        visible_errors = set(related) & self._field_errors.keys()
+
+        if visible_errors:
+            errors = self._collect_field_errors()
+
+            for field in visible_errors:
+                if field in errors:
+                    self._field_errors[field] = errors[field]
+                else:
+                    self._field_errors.pop(field, None)
 
         if name in {"providerId", "networkMode", "proxyHost", "proxyPort"}:
             self._test_status = "Not tested with this route and credentials."
+
+        self.changed.emit()
+
+    @Slot(str)
+    def validateField(self, name: str) -> None:
+        if not self._can_change() or name not in self._draft:
+            return
+
+        errors = self._collect_field_errors()
+
+        if name in errors:
+            self._field_errors[name] = errors[name]
+        else:
+            self._field_errors.pop(name, None)
 
         self.changed.emit()
 
@@ -247,12 +282,14 @@ class QuickSettings(QObject):
             return
 
         if not name.strip():
-            self._error = "Enter a tool name before choosing its executable."
-        elif path:
+            self._field_errors["toolName"] = "Enter a tool name before choosing its executable."
+        else:
+            self._field_errors.pop("toolName", None)
+
             # The frontend supplies paths only after an explicit file-picker
             # choice; opening Settings never discovers or executes programs.
-            self._tools[name.strip()] = path
-            self._error = ""
+            if path:
+                self._tools[name.strip()] = path
 
         self.changed.emit()
 
@@ -267,21 +304,58 @@ class QuickSettings(QObject):
             str(self._draft["networkMode"]), str(self._draft["proxyHost"]), cast(int, self._draft["proxyPort"])
         )
 
-    def _settings(self) -> AppSettings:
-        template = str(self._draft["template"])
-        parse_template(template)
-        backup_directory = str(self._draft["backupDirectory"])
+    def _collect_field_errors(self) -> dict[str, str]:
+        """Collect independent problems through the authoritative validators."""
+        errors: dict[str, str] = {}
 
-        if self._draft["backupEnabled"] and not backup_directory.strip():
-            raise ValueError("Choose a backup directory when permanent backups are enabled.")
+        try:
+            parse_template(str(self._draft["template"]))
+        except (TypeError, ValueError) as error:
+            errors["template"] = str(error)
 
-        language = str(self._draft["preferredLanguage"])
+        # Validate each padding field with a valid opposite field. Otherwise
+        # the first exception would hide another error in the same submission.
+        for field, track in (("trackDigits", True), ("discDigits", False)):
+            value = cast(int, self._draft[field])
 
-        if not language.strip():
-            raise ValueError("Enter a preferred language, or auto for automatic selection.")
+            try:
+                FilenameRenderPolicy(value if track else 1, 1 if track else value)
+            except (TypeError, ValueError) as error:
+                errors[field] = str(error)
+
+        if not str(self._draft["preferredLanguage"]).strip():
+            errors["preferredLanguage"] = "Enter a preferred language, or auto for automatic selection."
 
         network = self._network()
-        validate_network_settings(network)
+
+        if network.mode == "manual_proxy":
+            # Keep the provider validator as the single source of route rules.
+            # Known-valid counterpart values let both host and port report their
+            # own errors without parsing exception text or duplicating its rules.
+            for field, probe in (
+                ("proxyHost", replace(network, proxy_port=8080)),
+                ("proxyPort", replace(network, proxy_host="localhost")),
+            ):
+                try:
+                    validate_network_settings(probe)
+                except (TypeError, ValueError) as error:
+                    errors[field] = str(error)
+        else:
+            try:
+                validate_network_settings(network)
+            except (TypeError, ValueError) as error:
+                errors["networkMode"] = str(error)
+
+        if self._draft["backupEnabled"] and not str(self._draft["backupDirectory"]).strip():
+            errors["backupDirectory"] = "Choose a backup directory when permanent backups are enabled."
+
+        return errors
+
+    def _settings(self) -> AppSettings:
+        template = str(self._draft["template"])
+        backup_directory = str(self._draft["backupDirectory"])
+        language = str(self._draft["preferredLanguage"])
+        network = self._network()
 
         return replace(
             self._original,
@@ -311,6 +385,13 @@ class QuickSettings(QObject):
 
             if self._disk_snapshot() != self._file_snapshot:
                 raise ValueError("The settings file changed while Settings was open. Open Settings again.")
+
+            self._error = ""
+            self._field_errors = self._collect_field_errors()
+
+            if self._field_errors:
+                self.changed.emit()
+                return False
 
             settings = self._settings()
             updated = self._host.session_state
@@ -342,6 +423,7 @@ class QuickSettings(QObject):
         self._username = self._password = ""
         self._credential_snapshot = CredentialSnapshot(0, None)
         self._error = ""
+        self._field_errors = {}
         self.changed.emit()
 
     @Slot(result=bool)

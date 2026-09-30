@@ -25,6 +25,7 @@ from metadata_polisher.matching.track_mapping import (
     _AssessmentMatrix,
     _build_assessment_matrix,
     _feasible_segment_pairs,
+    _PairIndex,
     map_tracks,
 )
 
@@ -591,7 +592,7 @@ def test_content_support_boundary_is_shared_by_anchors_and_classification(
     anchors = _anchor_candidates(local, release.media[0].tracks, assessments, policy)
 
     assert result.mappings[0].classification is expected
-    assert anchors == (((0, 0),) if expected is MatchClassification.HIGH else ())
+    assert anchors == ((_PairIndex(local_index=0, provider_index=0),) if expected is MatchClassification.HIGH else ())
 
 
 @pytest.mark.parametrize("threshold", [-0.01, 1.01, float("inf"), float("nan"), True])
@@ -617,7 +618,7 @@ def test_close_duration_content_boundary_is_shared_by_anchors_and_classification
     anchors = _anchor_candidates(local, release.media[0].tracks, assessments, DEFAULT_MATCHING_POLICY)
 
     assert result.mappings[0].classification is expected
-    assert anchors == (((0, 0),) if expected is MatchClassification.HIGH else ())
+    assert anchors == ((_PairIndex(local_index=0, provider_index=0),) if expected is MatchClassification.HIGH else ())
 
 
 def _enumerated_segment_optimum(
@@ -680,7 +681,8 @@ def test_segment_objective_matches_independent_enumeration_of_250_native_cases()
         }
         feasible = _feasible_segment_pairs(matrix, **bounds, policy=policy)
         ambiguous = _ambiguous_locals(matrix, **bounds, policy=policy)
-        allowed = frozenset(pair for pair in feasible if pair[0] not in ambiguous)
+        allowed = frozenset((pair.local_index, pair.provider_index) for pair in feasible
+                            if pair.local_index not in ambiguous)
 
         # Only pair eligibility comes from production. Enumerate the objective
         # independently; the separate named fixtures above test whether those
@@ -691,10 +693,11 @@ def test_segment_objective_matches_independent_enumeration_of_250_native_cases()
             local_count=local_count,
             provider_count=provider_count,
         )
-        actual, returned_ambiguous = _align_segment(matrix, **bounds, policy=policy)
+        alignment = _align_segment(matrix, **bounds, policy=policy)
+        actual = tuple((pair.local_index, pair.provider_index) for pair in alignment.pairs)
 
         assert actual == expected, f"Native alignment case {case}: {local_count} by {provider_count}"
-        assert returned_ambiguous == ambiguous
+        assert alignment.ambiguous_local_indexes == ambiguous
 
 
 @pytest.mark.parametrize("missing", [None, 1, 20, 40])

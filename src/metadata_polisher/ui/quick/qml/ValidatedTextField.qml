@@ -2,23 +2,31 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Pair a native text input with its label and a compact validation message.
-// Other forms can provide their own label, input name and error without
-// replacing Qt's normal field appearance or duplicating the invalid state.
+// Pair native text editing with a shared frame, label and compact validation
+// message. Other forms can supply their own editor without duplicating the
+// normal, focused and invalid borders.
 ColumnLayout {
     id: root
 
     property string labelText: ""
     property string errorText: ""
+    property string accessibleLabel: labelText
+    // A specialised input can keep its existing completion/key handlers while
+    // sharing this field's invalid border and bounded, copyable diagnostic.
+    property Item editor: null
     property alias text: input.text
-    property alias inputControl: input
+    readonly property Item inputControl: editor || input
     property alias inputObjectName: input.objectName
+    property alias placeholderText: input.placeholderText
+    property alias selectByMouse: input.selectByMouse
+    readonly property string effectiveObjectName: inputControl.objectName
     readonly property bool invalid: errorText.length > 0
-    readonly property color errorColour: input.palette.window.hslLightness < 0.5
+    readonly property color errorColour: inputControl.palette.window.hslLightness < 0.5
         ? "#ff8078" : "#c32f25"
 
     signal accepted()
     signal edited()
+    signal finishedEditing()
 
     spacing: 4
 
@@ -30,31 +38,44 @@ ColumnLayout {
     }
 
     Item {
-        Layout.fillWidth: true
-        implicitHeight: input.implicitHeight
+        id: inputFrame
 
-        // The native Windows frame has a different corner shape. While the
-        // field is invalid, paint one filled outline behind the editable text
-        // so no grey pixel from that frame remains at the rounded corners.
+        Layout.fillWidth: true
+        implicitHeight: root.inputControl.implicitHeight
+
+        // Reparent only the optional editor; the ordinary input keeps its
+        // aliases and behaviour for forms already using this component.
+        Binding { target: root.editor; property: "parent"; value: inputFrame; when: root.editor !== null }
+        Binding {
+            target: root.inputControl.background
+            property: "visible"
+            value: false
+        }
+
+        // Windows' native frame can lose edge pixels at fractional display
+        // scales, even when its size matches the input. Paint one outline for
+        // every state; retain the actual editor's input and keyboard handling.
         Rectangle {
-            objectName: root.inputObjectName + "InvalidBorder"
+            objectName: root.effectiveObjectName + "Border"
             anchors.fill: parent
             radius: 3
-            color: input.palette.base
+            color: root.inputControl.palette.base
             border.width: 1
-            border.color: root.errorColour
-            visible: root.invalid
+            border.color: root.invalid ? root.errorColour
+                : root.inputControl.activeFocus ? root.inputControl.palette.highlight
+                : root.inputControl.palette.mid
         }
 
         AppTextField {
             id: input
 
             anchors.fill: parent
-            background.visible: !root.invalid
-            Accessible.name: root.labelText
+            visible: root.editor === null
+            Accessible.name: root.accessibleLabel
             Accessible.description: root.invalid ? root.errorText : ""
             onAccepted: root.accepted()
             onTextEdited: root.edited()
+            onEditingFinished: root.finishedEditing()
         }
     }
 
@@ -73,10 +94,10 @@ ColumnLayout {
         TextArea {
             id: message
 
-            objectName: root.inputObjectName + "Error"
+            objectName: root.effectiveObjectName + "Error"
             text: root.errorText
             color: root.errorColour
-            font: input.font
+            font: root.inputControl.font
             background: null
             padding: 0
             leftPadding: 0

@@ -42,7 +42,10 @@ from metadata_polisher.providers.coordinator import CoordinatedCandidate
 from metadata_polisher.scanner.grouping import AlbumGroup, GroupingReason
 from metadata_polisher.session.lookup_editing import change_language
 from metadata_polisher.session.review_editing import (
+    BatchReviewAction,
+    BatchReviewCommand,
     accept_safe_additions,
+    apply_batch_review,
     apply_field_decision,
     set_rename_decision,
 )
@@ -330,6 +333,35 @@ def test_known_sibling_in_another_group_blocks_preview_without_touching_filesyst
     kept = set_rename_decision(changed, "album", (file_id,), RenameDecision.KEEP_FILENAME, RenameSettings())
     assert change_set(kept).status is ChangeSetStatus.VALID_WITH_WARNINGS
     assert change_set(kept).rename_change is None
+
+
+@pytest.mark.parametrize("reverse_groups", (False, True))
+def test_cross_group_batch_rename_collisions_do_not_depend_on_group_order(reverse_groups) -> None:
+    first, second = make_source("first.flac"), make_source("second.flac")
+    initial = make_local_session(first, second)
+    original_group = initial.groups[0].group
+    groups = (
+        GroupState(replace(original_group, group_id="first", files=(first,))),
+        GroupState(replace(original_group, group_id="second", files=(second,))),
+    )
+    state = replace(initial, groups=tuple(reversed(groups)) if reverse_groups else groups, selection=None)
+    command = BatchReviewCommand(
+        file_ids=(first.file_id, second.file_id), fields=(), expected_revision=state.revision,
+        action=BatchReviewAction.INCLUDE_RENAMES,
+    )
+    result = apply_batch_review(state, command, RenameSettings(template="%title%"))
+
+    # Every group must see the complete destination set before the second pass.
+    # Outcome order still follows the captured IDs rather than the group order.
+    assert tuple(item.file_id for item in result.affected) == command.file_ids
+    assert result.blocked == result.skipped == ()
+    assert len(result.state.review_undo) == 1
+
+    for group in result.state.groups:
+        changes = group.reviewed_files[0].change_set
+        assert changes is not None
+        assert changes.status is ChangeSetStatus.BLOCKED
+        assert ChangeIssueCode.DESTINATION_COLLISION in {issue.code for issue in changes.validation.issues}
 
 
 def test_language_reranking_retains_planned_destination_blockers() -> None:

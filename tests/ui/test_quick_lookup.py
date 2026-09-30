@@ -329,8 +329,53 @@ def test_musicbrainz_contact_is_compact_with_reachable_actions(musicbrainz_conta
         assert 0 <= top < bottom <= contact.height()
 
 
+@pytest.mark.parametrize("field_state", ["normal", "focused", "invalid"])
+def test_native_contact_top_border_is_continuous(musicbrainz_contact_scene, qtbot, field_state):
+    from math import ceil
+
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QGuiApplication
+
+    if QGuiApplication.platformName() != "windows":
+        pytest.skip("The reported border gap requires native Windows painting.")
+
+    contact, field, _backend, facade = musicbrainz_contact_scene
+
+    if field_state == "normal":
+        field.setFocus(False)
+    else:
+        field.forceActiveFocus()
+
+    if field_state == "invalid":
+        field.setProperty("text", "bad contact")
+        assert not facade.setContact("bad contact")
+
+    qtbot.wait(100)
+    assert field.hasActiveFocus() == (field_state != "normal")
+    image = contact.grabWindow()
+    assert not image.isNull()
+    scale = image.devicePixelRatio()
+    origin = field.mapToScene(QPointF())
+    y = ceil(origin.y() * scale)
+
+    # Stay on the straight top edge, outside both rounded corners. At 125%
+    # the native frame loses a strip near its right corner despite matching
+    # the input's size. Compare actual painted pixels rather than item bounds.
+    def edge_colour(fraction):
+        return image.pixelColor(round((origin.x() + field.width() * fraction) * scale), y)
+
+    expected = edge_colour(0.5)
+    interior = image.pixelColor(round((origin.x() + field.width() / 2) * scale),
+                                round((origin.y() + field.height() / 2) * scale))
+    assert expected != interior, "The top border must be painted."
+
+    for fraction in (0.1, 0.25, 0.75, 0.9, 0.94):
+        assert edge_colour(fraction) == expected, f"Broken top border at {fraction:.0%} ({scale:g}x DPI)"
+
+
 def test_musicbrainz_contact_error_is_inline_and_clears_on_edit(musicbrainz_contact_scene, qtbot):
     from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtQml import QQmlProperty
     from PySide6.QtQuick import QQuickItem
     from PySide6.QtTest import QTest
 
@@ -347,7 +392,7 @@ def test_musicbrainz_contact_error_is_inline_and_clears_on_edit(musicbrainz_cont
 
     wrapper = contact.findChild(QQuickItem, "quickMusicBrainzContactField")
     message = contact.findChild(QQuickItem, "quickMusicBrainzContactError")
-    border = contact.findChild(QQuickItem, "quickMusicBrainzContactInvalidBorder")
+    border = contact.findChild(QQuickItem, "quickMusicBrainzContactBorder")
     assert wrapper is not None and message is not None and border is not None
     description = next(item for item in contact.findChildren(QQuickItem)
                        if str(item.property("text") or "").startswith("MusicBrainz requires a public project URL"))
@@ -391,8 +436,9 @@ def test_musicbrainz_contact_error_is_inline_and_clears_on_edit(musicbrainz_cont
     QTest.keyClick(contact, Qt.Key.Key_X)
     qtbot.waitUntil(lambda: not facade.contactError)
     assert field.property("text") == "not a contactx"
-    assert native_background.isVisible()
-    assert not message.isVisible() and not border.isVisible()
+    assert not native_background.isVisible()
+    assert not message.isVisible() and border.isVisible()
+    assert QQmlProperty(border, "border.color").read() != error_colour
 
     field.setProperty("text", "me@example.org")
     QTest.keyClick(contact, Qt.Key.Key_Return)

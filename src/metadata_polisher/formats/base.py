@@ -6,7 +6,7 @@ from typing import Protocol
 
 from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import MediaReadResult, StreamInfo
-from metadata_polisher.domain.metadata import MetadataChange, MetadataField, MetadataSnapshot
+from metadata_polisher.domain.metadata import FieldReadState, MetadataChange, MetadataField, MetadataSnapshot
 
 
 class MediaFormatError(RuntimeError):
@@ -35,6 +35,17 @@ class MediaFormatError(RuntimeError):
                 technical_detail=f"{type(cause).__name__}: {cause}",
             ),
         )
+
+
+@dataclass(frozen=True)
+class TagReadResult[T]:
+    """A decoded field value with its physical read state and diagnostic."""
+
+    value: T
+    # Empty values arise from both absent tags and unreadable content. Keep the
+    # state beside the value so matching and verification retain that distinction.
+    read_state: FieldReadState
+    detail: str | None = None
 
 
 @dataclass(frozen=True)

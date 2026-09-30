@@ -11,6 +11,7 @@ from typing import Protocol, cast
 
 from metadata_polisher.application.changes import (
     DEFAULT_RENAME_TEMPLATE,
+    ChangeIssueCode,
     ChangeSetStatus,
     ChangeValidationFacts,
     FileChangeSet,
@@ -34,6 +35,7 @@ from metadata_polisher.execution.events import (
 )
 from metadata_polisher.formats.base import MediaFormatAdapter, MediaFormatError
 from metadata_polisher.formats.registry import FormatRegistry
+from metadata_polisher.infrastructure.filesystem import read_file_version
 from metadata_polisher.infrastructure.reporting import (
     ProcessingReportRequest,
     ReportErrorCode,
@@ -468,6 +470,14 @@ class LocalApplyPreflightInspector:
         scan_root_resolved = self._probe.resolve(backup.scan_root)
         source_within_scan = source_resolved.is_relative_to(scan_root_resolved)
         source_readable = source_within_scan and self._probe.is_readable_file(source_path)
+        source_unchanged = True
+
+        if source.file_version is not None:
+            try:
+                source_unchanged = read_file_version(source_path) == source.file_version
+            except OSError:
+                source_unchanged = False
+
         directory_writable = self._probe.is_writable_directory(source_path.parent)
         adapter = self._registry.detect(source_path) if source_readable else None
         source_size = self._probe.file_size(source_path)
@@ -566,6 +576,7 @@ class LocalApplyPreflightInspector:
             adapter=adapter,
             validation=ChangeValidationFacts(
                 source_readable=source_readable,
+                source_unchanged=source_unchanged,
                 directory_writable=directory_writable,
                 directory_listing_available=directory_listing_available,
                 adapter_available=adapter is not None,
@@ -808,6 +819,9 @@ class ApplyFileOutcome:
     @property
     def filesystem_changed(self) -> bool:
         """Whether a later reducer must conservatively rescan this source group."""
+        if any(issue.code is ChangeIssueCode.SOURCE_CHANGED for issue in self.change_set.validation.issues):
+            return True
+
         if self.transaction_result is None:
             return False
 
@@ -815,7 +829,7 @@ class ApplyFileOutcome:
             self.transaction_result.status is FileApplyStatus.SUCCEEDED
             or self.transaction_result.final_path != self.source_path
             or any(
-                issue.code is MediaErrorCode.CLEANUP_FAILED
+                issue.code in {MediaErrorCode.CLEANUP_FAILED, MediaErrorCode.SOURCE_CHANGED}
                 for issue in self.transaction_result.issues
             )
         )
@@ -1037,6 +1051,22 @@ class _PreparedFile:
     capacity: FileCapacitySnapshot | None
 
 
+@dataclass(frozen=True)
+class _DraftGroup:
+    """Pure file plans belonging to one captured album request."""
+
+    request: ApplyGroupRequest
+    files: tuple[_DraftFile, ...]
+
+
+@dataclass(frozen=True)
+class _PreparedGroup:
+    """Keep an album's identity beside its preflighted files through each stage."""
+
+    request: ApplyGroupRequest
+    files: tuple[_PreparedFile, ...]
+
+
 class _DiscardEventSink:
     def emit(self, event: OperationEvent) -> None:
         del event
@@ -1071,7 +1101,7 @@ class ApplyService:
         total_files = sum(len(group.files) for group in request.groups)
         active_events.emit(OperationStageChanged(request.operation_id, ApplyStage.PREFLIGHTING))
         active_events.emit(OperationProgress(request.operation_id, ApplyStage.PREFLIGHTING, 0, total_files))
-        draft_groups: list[tuple[ApplyGroupRequest, tuple[_DraftFile, ...]]] = []
+        draft_groups: list[_DraftGroup] = []
 
         # Derive every pure draft before the first external probe. This preserves
         # no-change truth even if cancellation stops preflight part-way through.
@@ -1092,17 +1122,17 @@ class ApplyService:
                 )
                 drafts.append(_DraftFile(file_request, proposed, initial_facts))
 
-            draft_groups.append((group, tuple(drafts)))
+            draft_groups.append(_DraftGroup(request=group, files=tuple(drafts)))
 
-        prepared_groups: list[tuple[ApplyGroupRequest, tuple[_PreparedFile, ...]]] = []
+        prepared_groups: list[_PreparedGroup] = []
         prepared_by_file_id: dict[str, _PreparedFile] = {}
         prepared_count = 0
         preflight_cancelled = False
 
-        for group, group_drafts in draft_groups:
+        for draft_group in draft_groups:
             prepared_files: list[_PreparedFile] = []
 
-            for draft in group_drafts:
+            for draft in draft_group.files:
                 file_request = draft.request
                 proposed = draft.change_set
                 operation_requested = self._needs_external_preflight(proposed)
@@ -1183,38 +1213,47 @@ class ApplyService:
 
                     break
 
-            prepared_groups.append((group, tuple(prepared_files)))
+            prepared_groups.append(
+                _PreparedGroup(request=draft_group.request, files=tuple(prepared_files))
+            )
 
             if preflight_cancelled:
                 break
 
         if preflight_cancelled:
-            cancellation_groups = [
-                (
-                    group,
-                    tuple(
-                        prepared_by_file_id.get(
-                            draft.request.source.file_id,
-                            _PreparedFile(
-                                draft.request,
-                                draft.change_set,
-                                None,
-                                draft.validation,
-                                None,
-                            ),
+            cancellation_groups: list[_PreparedGroup] = []
+
+            # Preserve every draft, including files not yet probed. Already
+            # inspected files retain their fresh facts; the others retain their
+            # pure plan so a cancelled batch still reports no-change files truthfully.
+            for draft_group in draft_groups:
+                cancellation_files: list[_PreparedFile] = []
+
+                for draft in draft_group.files:
+                    cancellation_file = prepared_by_file_id.get(draft.request.source.file_id)
+
+                    if cancellation_file is None:
+                        cancellation_file = _PreparedFile(
+                            request=draft.request,
+                            change_set=draft.change_set,
+                            adapter=None,
+                            validation=draft.validation,
+                            capacity=None,
                         )
-                        for draft in drafts
-                    ),
+
+                    cancellation_files.append(cancellation_file)
+
+                cancellation_groups.append(
+                    _PreparedGroup(request=draft_group.request, files=tuple(cancellation_files))
                 )
-                for group, drafts in draft_groups
-            ]
+
             return self._finish_without_transactions(
                 request,
                 cancellation_groups,
                 batch_blocked=any(
                     prepared.change_set.status is ChangeSetStatus.BLOCKED
-                    for _group, prepared_files in cancellation_groups
-                    for prepared in prepared_files
+                    for prepared_group in cancellation_groups
+                    for prepared in prepared_group.files
                 ),
                 events=active_events,
             )
@@ -1225,14 +1264,14 @@ class ApplyService:
         prepared_groups = self._apply_batch_path_collisions(request, prepared_groups)
         batch_blocked = any(
             prepared.change_set.status is ChangeSetStatus.BLOCKED
-            for _group, prepared_files in prepared_groups
-            for prepared in prepared_files
+            for prepared_group in prepared_groups
+            for prepared in prepared_group.files
         )
 
         requested_operation_present = any(
             self._has_file_operation(prepared.change_set)
-            for _group, prepared_files in prepared_groups
-            for prepared in prepared_files
+            for prepared_group in prepared_groups
+            for prepared in prepared_group.files
         )
 
         if (
@@ -1256,11 +1295,12 @@ class ApplyService:
 
         # A failure stops the remaining writes in that album only. Cancellation
         # persists across albums, while successful earlier files remain committed.
-        for group, prepared_batch_files in prepared_groups:
+        for prepared_group in prepared_groups:
+            group = prepared_group.request
             file_outcomes: list[ApplyFileOutcome] = []
             album_failed = False
 
-            for prepared in prepared_batch_files:
+            for prepared in prepared_group.files:
                 if not self._has_file_operation(prepared.change_set):
                     if cancelled or (
                         transaction_seen and cancellation.is_cancelled()
@@ -1405,7 +1445,14 @@ class ApplyService:
 
                 try:
                     assert original.adapter is not None
+                    version = (
+                        read_file_version(outcome.final_path)
+                        if original.request.source.file_version is not None else None
+                    )
                     read_result = original.adapter.read(outcome.final_path)
+
+                    if version is not None and read_file_version(outcome.final_path) != version:
+                        raise OSError("The written file changed during metadata refresh.")
 
                     if not isinstance(read_result, MediaReadResult):
                         raise TypeError("the format adapter did not return a metadata read result")
@@ -1415,6 +1462,7 @@ class ApplyService:
                         path=outcome.final_path,
                         read_result=read_result,
                         filename_hints=extract_filename_hints(outcome.final_path),
+                        file_version=version,
                     )
                     files.append(replace(outcome, refreshed_source=refreshed))
                 except Exception as error:
@@ -1452,7 +1500,7 @@ class ApplyService:
     def _finish_without_transactions(
         self,
         request: ApplyBatchRequest,
-        groups: Sequence[tuple[ApplyGroupRequest, tuple[_PreparedFile, ...]]],
+        groups: Sequence[_PreparedGroup],
         *,
         batch_blocked: bool,
         events: OperationEventSink,
@@ -1463,19 +1511,25 @@ class ApplyService:
             if batch_blocked
             else ApplySkipReason.CANCELLED_BEFORE_START
         )
-        group_outcomes = tuple(
-            ApplyGroupOutcome(
-                group.group_id,
-                group.base_group_revision,
-                tuple(
-                    self._no_changes(group, prepared)
-                    if not self._has_file_operation(prepared.change_set)
-                    else self._skipped(group, prepared, skip_reason)
-                    for prepared in prepared_files
-                ),
+        outcomes: list[ApplyGroupOutcome] = []
+
+        for prepared_group in groups:
+            group = prepared_group.request
+            file_outcomes: list[ApplyFileOutcome] = []
+
+            for prepared in prepared_group.files:
+                if self._has_file_operation(prepared.change_set):
+                    outcome = self._skipped(group, prepared, skip_reason)
+                else:
+                    outcome = self._no_changes(group, prepared)
+
+                file_outcomes.append(outcome)
+
+            outcomes.append(
+                ApplyGroupOutcome(group.group_id, group.base_group_revision, tuple(file_outcomes))
             )
-            for group, prepared_files in groups
-        )
+
+        group_outcomes = tuple(outcomes)
         status = _derive_batch_status(group_outcomes)
         self._emit_non_transaction_events(request.operation_id, group_outcomes, events)
         report_result = self._write_report(request, group_outcomes, status, events)
@@ -1603,13 +1657,13 @@ class ApplyService:
     @staticmethod
     def _apply_batch_capacity(
         request: ApplyBatchRequest,
-        groups: Sequence[tuple[ApplyGroupRequest, tuple[_PreparedFile, ...]]],
-    ) -> list[tuple[ApplyGroupRequest, tuple[_PreparedFile, ...]]]:
+        groups: Sequence[_PreparedGroup],
+    ) -> list[_PreparedGroup]:
         """Evaluate serial temp peak and cumulative backups from one frozen snapshot."""
         operation_files = tuple(
             prepared
-            for _group, prepared_files in groups
-            for prepared in prepared_files
+            for prepared_group in groups
+            for prepared in prepared_group.files
             if ApplyService._needs_external_preflight(prepared.change_set)
         )
         free_by_storage: dict[str, int] = {}
@@ -1680,8 +1734,8 @@ class ApplyService:
 
         rebuilt_by_file_id: dict[str, _PreparedFile] = {}
 
-        for _group, prepared_files in groups:
-            for prepared in prepared_files:
+        for prepared_group in groups:
+            for prepared in prepared_group.files:
                 if not ApplyService._needs_external_preflight(prepared.change_set):
                     rebuilt_by_file_id[prepared.request.source.file_id] = prepared
 
@@ -1730,23 +1784,23 @@ class ApplyService:
                 )
 
         return [
-            (
-                group,
-                tuple(rebuilt_by_file_id[item.request.source.file_id] for item in prepared_files),
+            replace(
+                prepared_group,
+                files=tuple(rebuilt_by_file_id[item.request.source.file_id] for item in prepared_group.files),
             )
-            for group, prepared_files in groups
+            for prepared_group in groups
         ]
 
     @staticmethod
     def _apply_batch_path_collisions(
         request: ApplyBatchRequest,
-        groups: Sequence[tuple[ApplyGroupRequest, tuple[_PreparedFile, ...]]],
-    ) -> list[tuple[ApplyGroupRequest, tuple[_PreparedFile, ...]]]:
+        groups: Sequence[_PreparedGroup],
+    ) -> list[_PreparedGroup]:
         """Rebuild with selected source/target names visible as one Windows batch."""
         indexed = tuple(
             prepared
-            for _group, prepared_files in groups
-            for prepared in prepared_files
+            for prepared_group in groups
+            for prepared in prepared_group.files
         )
         rebuilt_by_file_id: dict[str, _PreparedFile] = {}
 
@@ -1808,11 +1862,11 @@ class ApplyService:
             )
 
         return [
-            (
-                group,
-                tuple(rebuilt_by_file_id[item.request.source.file_id] for item in prepared_files),
+            replace(
+                prepared_group,
+                files=tuple(rebuilt_by_file_id[item.request.source.file_id] for item in prepared_group.files),
             )
-            for group, prepared_files in groups
+            for prepared_group in groups
         ]
 
     @staticmethod

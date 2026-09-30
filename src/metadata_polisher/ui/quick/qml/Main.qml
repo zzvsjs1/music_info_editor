@@ -942,7 +942,8 @@ ApplicationWindow {
 
             Label {
                 Layout.fillWidth: true
-                text: "Changing the disc number clears this group's candidate selection, track mapping and review."
+                text: "Changing the disc number clears this group's candidate selection and track mapping. "
+                      + "Candidate choices require review again. Manual values, Clear, Keep existing and filename choices are retained."
                 wrapMode: Text.WordWrap
             }
 

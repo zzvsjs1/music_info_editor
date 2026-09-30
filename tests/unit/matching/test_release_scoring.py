@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -471,6 +471,82 @@ def test_local_builder_uses_present_tags_then_per_file_filename_fallback_and_exp
         MatchReasonCode.LOCAL_ALBUM_CONFLICT,
         MatchReasonCode.LOCAL_YEAR_CONFLICT,
     }
+
+
+@pytest.mark.parametrize("file_order", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])
+def test_local_conflict_notices_keep_their_order_when_tagged_files_arrive_in_different_orders(
+    file_order: tuple[int, ...],
+) -> None:
+    files = (
+        make_local_file(1, title="Opening", album="Album A", album_artists=("Artist A",),
+                        date="2024", disc_number=1, disc_total=1, track_number=1),
+        make_local_file(2, title="Journey", album="Album B", album_artists=("Artist B",),
+                        date="2025", disc_number=2, disc_total=2, track_number=2),
+        make_local_file(3, title="Finale", album="Album A", album_artists=("Artist A",),
+                        date="not-a-date", disc_number=1, disc_total=1, track_number=3),
+    )
+
+    result = build_local_release_evidence(make_group(*(files[index] for index in file_order)))
+
+    # Several independent conflicts must survive extraction. Their explanation
+    # order follows the evidence dimensions, while trustworthy track tags still
+    # establish the same track sequence independently of file arrival order.
+    assert (result.album_title, result.artists, result.year, result.disc_number, result.disc_total) == (
+        None, (), None, None, None,
+    )
+    assert tuple(track.title for track in result.tracks) == ("Opening", "Journey", "Finale")
+    assert tuple(notice.code for notice in result.notices) == (
+        MatchReasonCode.LOCAL_ALBUM_CONFLICT,
+        MatchReasonCode.LOCAL_ARTIST_CONFLICT,
+        MatchReasonCode.LOCAL_YEAR_INVALID,
+        MatchReasonCode.LOCAL_YEAR_CONFLICT,
+        MatchReasonCode.LOCAL_TRACK_ORDER_TAGGED,
+        MatchReasonCode.LOCAL_DISC_CONFLICT,
+        MatchReasonCode.LOCAL_DISC_TOTAL_CONFLICT,
+    )
+
+
+def test_partial_numbered_score_keeps_fractional_agreement_unknown_year_and_explanation_order() -> None:
+    files = (
+        make_local_file(1, title="Opening", date=None, track_number=1),
+        make_local_file(3, title="Finale", date=None, track_number=3),
+    )
+    medium = ReleaseMedium(
+        medium_number=1,
+        title=None,
+        tracks=(
+            make_provider_track(1, "Opening"),
+            make_provider_track(2, "Journey"),
+            make_provider_track(3, "Finale", duration_seconds=191.0),
+        ),
+    )
+    candidate = replace(make_candidate("mixed-evidence", (medium,)), media_complete=False)
+
+    result = score_release_medium(build_local_release_evidence(make_group(*files)), candidate, medium)
+
+    # The two supported title pairs remain exact, but the missing middle track
+    # and one real duration conflict require review. The unknown year removes
+    # its five points from the denominator: 83 1/3 earned out of 95 gives the
+    # six-decimal ranking score below, rather than the rounded display sum.
+    assert result.score == 87.719298
+    assert result.classification is MatchClassification.REVIEW
+    assert tuple((item.code, item.contribution) for item in result.evidence) == (
+        (MatchReasonCode.ALBUM_TITLE_EXACT, 25.0),
+        (MatchReasonCode.TRACK_TITLE_NUMBER_EXACT, 30.0),
+        (MatchReasonCode.TRACK_COUNT_CONTRADICTION, 13.333333),
+        (MatchReasonCode.DURATION_LARGE_MISMATCH, 5.0),
+        (MatchReasonCode.DISC_EXACT, 5.0),
+        (MatchReasonCode.YEAR_UNAVAILABLE, 0.0),
+        (MatchReasonCode.ARTIST_EXACT, 3.0),
+        (MatchReasonCode.LANGUAGE_SCRIPT_MATCH, 2.0),
+        (MatchReasonCode.TRACK_COMPARISON_PARTIAL, 0.0),
+        (MatchReasonCode.LOCAL_TRACK_ORDER_TAGGED, 0.0),
+        (MatchReasonCode.PROVIDER_LIST_INCOMPLETE, 0.0),
+    )
+    assert result.evidence[1].detail == (
+        "Content-supported source-number title agreement is 100.0% across 2/3 positions."
+    )
+    assert result.evidence[3].detail == "Duration agreement uses 2 pairs; largest difference is 11.000 seconds."
 
 
 # A high average over a few title pairs cannot establish the whole album.

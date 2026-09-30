@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from metadata_polisher.application.changes import (
     ChangeValidationResult,
     FileChangeSet,
@@ -20,8 +22,11 @@ from metadata_polisher.execution.events import (
     FileApplyStatus,
     FileCompleted,
     FileOperationEvent,
+    FileStageChanged,
+    FileTransactionStage,
 )
 from metadata_polisher.formats.base import VerificationResult
+from metadata_polisher.infrastructure.filesystem import read_file_version
 from metadata_polisher.infrastructure.transaction import (
     BackupPolicy,
     TransactionalFileWriter,
@@ -165,5 +170,107 @@ def test_real_temporary_copy_is_verified_renamed_and_cleans_the_original(
     assert destination_path.read_text(encoding="utf-8") == (
         "title=New title\npayload=audio-bytes-stay\n"
     )
-    assert not tuple(album_directory.glob(".*.metadata-polisher-*.simple"))
+    assert not tuple(album_directory.glob(".metadata-polisher-*.simple"))
     assert isinstance(events.events[-1], FileCompleted)
+
+
+@pytest.mark.parametrize(
+    "edit_stage,rename",
+    (
+        (FileTransactionStage.BACKING_UP, False),
+        (FileTransactionStage.COPYING_TEMPORARY, False),
+        (FileTransactionStage.COMMITTING, False),
+        (FileTransactionStage.RENAMING, True),
+        (FileTransactionStage.CLEANING_ORIGINAL, True),
+    ),
+)
+def test_external_edits_at_write_boundaries_preserve_the_source(
+    tmp_path: Path, edit_stage: FileTransactionStage, rename: bool,
+) -> None:
+    source_path = tmp_path / "raw.simple"
+    destination = tmp_path / "renamed.simple"
+    source_path.write_text("title=Old title\npayload=audio-bytes-stay\n", encoding="utf-8")
+    source = LocalMediaFile(
+        path=source_path,
+        format_id="simple",
+        file_id="simple-file",
+        read_result=MediaReadResult(
+            metadata=MetadataSnapshot(title="Old title"),
+            field_states={field: FieldReadState.MISSING for field in MetadataField},
+            stream_info=StreamInfo(10.0, 44_100, 2, 16, "SIMPLE"),
+        ),
+        file_version=read_file_version(source_path),
+    )
+    rename_change = RenameChange(source_path, destination) if rename else None
+    changes = FileChangeSet(
+        file_id=source.file_id,
+        metadata_changes=(MetadataChange(MetadataField.TITLE, "Old title", "New title"),),
+        rename_change=rename_change,
+        final_metadata=MetadataSnapshot(title="New title"),
+        rename_decision=RenameDecision.APPLY_RENAME if rename else RenameDecision.KEEP_FILENAME,
+        rename_preview=rename_change,
+        validation=ChangeValidationResult(),
+    )
+    external_text = "title=Old title\npayload=audio-bytes-stay\nartist=External artist\n"
+
+    class ExternalEditor(RecordingEventSink):
+        def emit(self, event: FileOperationEvent) -> None:
+            super().emit(event)
+
+            if isinstance(event, FileStageChanged) and event.stage is edit_stage:
+                source_path.write_text(external_text, encoding="utf-8")
+
+    result = TransactionalFileWriter().apply_file(
+        source, changes, SimpleTextAdapter(),  # type: ignore[arg-type]
+        BackupPolicy(True, tmp_path / "backups", tmp_path, "conflict"),
+        NeverCancelledToken(), ExternalEditor(),
+    )
+
+    assert result.status is FileApplyStatus.FAILED
+    assert result.issues[0].code is MediaErrorCode.SOURCE_CHANGED
+    published = edit_stage is FileTransactionStage.CLEANING_ORIGINAL
+    assert result.final_path == (destination if published else source_path)
+    assert source_path.read_text(encoding="utf-8") == external_text
+    assert destination.exists() is published
+    assert not tuple(tmp_path.glob(".metadata-polisher-*.simple"))
+
+
+def test_source_moved_by_an_external_editor_does_not_delete_its_new_path(tmp_path: Path) -> None:
+    source_path = tmp_path / "raw.simple"
+    destination = tmp_path / "renamed.simple"
+    original = "title=Old title\npayload=audio-bytes-stay\n"
+    source_path.write_text(original, encoding="utf-8")
+    source = LocalMediaFile(
+        path=source_path, format_id="simple", file_id="simple-file",
+        read_result=MediaReadResult(
+            metadata=MetadataSnapshot(title="Old title"),
+            field_states={field: FieldReadState.MISSING for field in MetadataField},
+            stream_info=StreamInfo(10.0, 44_100, 2, 16, "SIMPLE"),
+        ),
+        file_version=read_file_version(source_path),
+    )
+    rename = RenameChange(source_path, destination)
+    changes = FileChangeSet(
+        file_id=source.file_id,
+        metadata_changes=(MetadataChange(MetadataField.TITLE, "Old title", "New title"),),
+        rename_change=rename, final_metadata=MetadataSnapshot(title="New title"),
+        rename_decision=RenameDecision.APPLY_RENAME, rename_preview=rename,
+        validation=ChangeValidationResult(),
+    )
+
+    class MovingEditor(RecordingEventSink):
+        def emit(self, event: FileOperationEvent) -> None:
+            super().emit(event)
+
+            if isinstance(event, FileStageChanged) and event.stage is FileTransactionStage.CLEANING_ORIGINAL:
+                source_path.replace(destination)
+
+    result = TransactionalFileWriter().apply_file(
+        source, changes, SimpleTextAdapter(),  # type: ignore[arg-type]
+        BackupPolicy(False, None, tmp_path, "conflict"), NeverCancelledToken(), MovingEditor(),
+    )
+
+    assert result.status is FileApplyStatus.FAILED
+    assert result.issues[0].code is MediaErrorCode.SOURCE_CHANGED
+    assert result.final_path == destination
+    assert destination.read_text(encoding="utf-8") == original

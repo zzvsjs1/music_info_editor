@@ -104,3 +104,20 @@ def test_missing_and_unreadable_states_are_distinct() -> None:
     assert FieldReadState.MISSING is not FieldReadState.UNREADABLE
     assert FieldReadState.MISSING.value == "missing"
     assert FieldReadState.UNREADABLE.value == "unreadable"
+
+
+def test_metadata_value_preserves_semantic_types_and_empty_values() -> None:
+    from metadata_polisher.domain.metadata import metadata_value
+
+    populated = MetadataSnapshot(
+        title="Opening", artists=("Artist One", "Artist Two"), album="Album",
+        album_artists=("Ensemble",), composers=("Composer",), track=Position(0, 12),
+        disc=Position(None, 2), date="2026-09", genres=("Soundtrack",),
+    )
+    empty = MetadataSnapshot()
+
+    # A typed lookup must return the original semantic value: absence, an empty
+    # collection and a partially known position still have different meanings.
+    for field in MetadataField:
+        assert metadata_value(populated, field) == getattr(populated, field.value)
+        assert metadata_value(empty, field) == getattr(empty, field.value)

@@ -141,3 +141,26 @@ def test_filename_actions_reach_healthy_members_of_mixed_scope(make_backend):
     # valid no-op members while retaining the separate stale-album blocker.
     assert "3 skipped" in backend.status
     assert "1 blocked" in backend.status
+
+
+def test_include_checkboxes_refresh_the_included_review_scope(make_backend):
+    backend = make_backend(make_batch_session())
+    first, second = tuple(source.file_id for source in backend.session_state.groups[0].group.files)[:2]
+    backend.set_included_file_ids(frozenset({first}))
+    backend.setReviewScope("included")
+
+    assert backend.scopeFileIds == [first]
+    assert backend.review.index(0, 4).data() == "Local first"
+
+    # Checkbox commands change the declared scope immediately. The table must
+    # describe the same files which a subsequent review action will affect.
+    backend.setIncluded(second, True)
+    assert backend.review.index(0, 4).data() == "Mixed values"
+
+    backend.setIncluded(first, False)
+    assert backend.scopeFileIds == [second]
+    assert backend.review.index(0, 4).data() == "Local second"
+
+    backend.setIncluded(second, False)
+    assert backend.scopeFileIds == []
+    assert backend.review.rowCount() == 0

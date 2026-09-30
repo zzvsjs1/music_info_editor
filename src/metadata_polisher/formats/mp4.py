@@ -15,7 +15,7 @@ from metadata_polisher.domain.metadata import (
     MetadataSnapshot,
     Position,
 )
-from metadata_polisher.formats.base import MediaFormatError, VerificationResult
+from metadata_polisher.formats.base import MediaFormatError, TagReadResult, VerificationResult
 
 
 class _Mp4Info(Protocol):
@@ -120,83 +120,83 @@ def _validate_utf8(values: tuple[str, ...]) -> None:
 def _read_text_values(
     tags: Mapping[str, object] | None,
     atom: str,
-) -> tuple[tuple[str, ...], FieldReadState, str | None]:
+) -> TagReadResult[tuple[str, ...]]:
     if tags is None or atom not in tags:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
     try:
         raw_value = tags[atom]
     except Exception as error:
-        return (), FieldReadState.UNREADABLE, str(error)
+        return TagReadResult((), FieldReadState.UNREADABLE, str(error))
 
     if not isinstance(raw_value, (list, tuple)):
-        return (), FieldReadState.UNREADABLE, f"{atom} did not contain a text sequence"
+        return TagReadResult((), FieldReadState.UNREADABLE, f"{atom} did not contain a text sequence")
 
     if any(not isinstance(value, str) for value in raw_value):
-        return (), FieldReadState.UNREADABLE, f"{atom} contained a non-string value"
+        return TagReadResult((), FieldReadState.UNREADABLE, f"{atom} contained a non-string value")
 
     values = tuple(value for value in raw_value if value != "")
 
     if not values:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
-    return values, FieldReadState.PRESENT, None
+    return TagReadResult(values, FieldReadState.PRESENT)
 
 
 def _read_single_value(
     tags: Mapping[str, object] | None,
     atom: str,
-) -> tuple[str | None, FieldReadState, str | None]:
-    values, state, detail = _read_text_values(tags, atom)
+) -> TagReadResult[str | None]:
+    text_read = _read_text_values(tags, atom)
 
-    if state is not FieldReadState.PRESENT:
-        return None, state, detail
+    if text_read.read_state is not FieldReadState.PRESENT:
+        return TagReadResult(None, text_read.read_state, text_read.detail)
 
-    return values[0], state, None
+    return TagReadResult(text_read.value[0], text_read.read_state)
 
 
 def _read_position(
     tags: Mapping[str, object] | None,
     atom: str,
-) -> tuple[Position, FieldReadState, str | None]:
+) -> TagReadResult[Position]:
     if tags is None or atom not in tags:
-        return Position(), FieldReadState.MISSING, None
+        return TagReadResult(Position(), FieldReadState.MISSING)
 
     try:
         raw_value = tags[atom]
     except Exception as error:
-        return Position(), FieldReadState.UNREADABLE, str(error)
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, str(error))
 
     if not isinstance(raw_value, (list, tuple)):
-        return Position(), FieldReadState.UNREADABLE, f"{atom} did not contain a position sequence"
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, f"{atom} did not contain a position sequence")
 
     if not raw_value:
-        return Position(), FieldReadState.MISSING, None
+        return TagReadResult(Position(), FieldReadState.MISSING)
 
     if len(raw_value) != 1:
-        return Position(), FieldReadState.UNREADABLE, f"{atom} contained multiple positions"
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, f"{atom} contained multiple positions")
 
     pair = raw_value[0]
 
     if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-        return Position(), FieldReadState.UNREADABLE, f"{atom} did not contain a number/total pair"
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, f"{atom} did not contain a number/total pair")
 
     number, total = pair
 
     if type(number) is not int or type(total) is not int:
-        return Position(), FieldReadState.UNREADABLE, f"{atom} contained a non-integer position"
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, f"{atom} contained a non-integer position")
 
     if not 0 <= number <= _MP4_POSITION_MAX or not 0 <= total <= _MP4_POSITION_MAX:
-        return Position(), FieldReadState.UNREADABLE, f"{atom} contained an out-of-range position"
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, f"{atom} contained an out-of-range position")
 
     # MP4 uses zero for an absent component; the domain uses None so absence
     # cannot be mistaken for a real zero-numbered track during matching.
     position = Position(number=number or None, total=total or None)
 
     if position == Position():
-        return position, FieldReadState.MISSING, None
+        return TagReadResult(position, FieldReadState.MISSING)
 
-    return position, FieldReadState.PRESENT, None
+    return TagReadResult(position, FieldReadState.PRESENT)
 
 
 def _read_issue(field: MetadataField, detail: str | None) -> Issue:
@@ -304,31 +304,31 @@ class Mp4Adapter:
         multi_values: dict[MetadataField, tuple[str, ...]] = {}
 
         for field, atom in _SINGLE_ATOMS.items():
-            single_value, state, detail = _read_single_value(tags, atom)
-            single_values[field] = single_value
-            states[field] = state
+            single_read = _read_single_value(tags, atom)
+            single_values[field] = single_read.value
+            states[field] = single_read.read_state
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            if single_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, single_read.detail))
 
         for field, atom in _MULTI_ATOMS.items():
-            multi_value, state, detail = _read_text_values(tags, atom)
-            multi_values[field] = multi_value
-            states[field] = state
+            multi_read = _read_text_values(tags, atom)
+            multi_values[field] = multi_read.value
+            states[field] = multi_read.read_state
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            if multi_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, multi_read.detail))
 
-        track, track_state, track_detail = _read_position(tags, _POSITION_ATOMS[MetadataField.TRACK])
-        disc, disc_state, disc_detail = _read_position(tags, _POSITION_ATOMS[MetadataField.DISC])
-        states[MetadataField.TRACK] = track_state
-        states[MetadataField.DISC] = disc_state
+        track_read = _read_position(tags, _POSITION_ATOMS[MetadataField.TRACK])
+        disc_read = _read_position(tags, _POSITION_ATOMS[MetadataField.DISC])
+        states[MetadataField.TRACK] = track_read.read_state
+        states[MetadataField.DISC] = disc_read.read_state
 
-        if track_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.TRACK, track_detail))
+        if track_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.TRACK, track_read.detail))
 
-        if disc_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.DISC, disc_detail))
+        if disc_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.DISC, disc_read.detail))
 
         return MediaReadResult(
             metadata=MetadataSnapshot(
@@ -337,8 +337,8 @@ class Mp4Adapter:
                 album=single_values[MetadataField.ALBUM],
                 album_artists=multi_values[MetadataField.ALBUM_ARTISTS],
                 composers=multi_values[MetadataField.COMPOSERS],
-                track=track,
-                disc=disc,
+                track=track_read.value,
+                disc=disc_read.value,
                 date=single_values[MetadataField.DATE],
                 genres=multi_values[MetadataField.GENRES],
             ),

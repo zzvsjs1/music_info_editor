@@ -15,7 +15,7 @@ from metadata_polisher.domain.metadata import (
     MetadataSnapshot,
     Position,
 )
-from metadata_polisher.formats.base import MediaFormatError, VerificationResult
+from metadata_polisher.formats.base import MediaFormatError, TagReadResult, VerificationResult
 
 
 class _FlacInfo(Protocol):
@@ -78,75 +78,75 @@ def _find_value(tags: Mapping[str, object] | None, keys: Sequence[str]) -> tuple
 def _read_text_values(
     tags: Mapping[str, object] | None,
     keys: Sequence[str],
-) -> tuple[tuple[str, ...], FieldReadState, str | None]:
+) -> TagReadResult[tuple[str, ...]]:
     present, raw_value = _find_value(tags, keys)
 
     if not present:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
     if not isinstance(raw_value, (list, tuple)):
-        return (), FieldReadState.UNREADABLE, "Vorbis value was not a list of strings"
+        return TagReadResult((), FieldReadState.UNREADABLE, "Vorbis value was not a list of strings")
 
     if any(not isinstance(value, str) for value in raw_value):
-        return (), FieldReadState.UNREADABLE, "Vorbis value contained a non-string item"
+        return TagReadResult((), FieldReadState.UNREADABLE, "Vorbis value contained a non-string item")
 
     values = tuple(value for value in raw_value if value != "")
 
     if not values:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
-    return values, FieldReadState.PRESENT, None
+    return TagReadResult(values, FieldReadState.PRESENT)
 
 
 def _read_single_value(
     tags: Mapping[str, object] | None,
     key: str,
-) -> tuple[str | None, FieldReadState, str | None]:
-    values, state, detail = _read_text_values(tags, (key,))
+) -> TagReadResult[str | None]:
+    text_read = _read_text_values(tags, (key,))
 
-    if state is not FieldReadState.PRESENT:
-        return None, state, detail
+    if text_read.read_state is not FieldReadState.PRESENT:
+        return TagReadResult(None, text_read.read_state, text_read.detail)
 
-    if len(set(values)) > 1:
-        return None, FieldReadState.UNREADABLE, f"Conflicting repeated {key} values"
+    if len(set(text_read.value)) > 1:
+        return TagReadResult(None, FieldReadState.UNREADABLE, f"Conflicting repeated {key} values")
 
-    return values[0], state, None
+    return TagReadResult(text_read.value[0], text_read.read_state)
 
 
 def _read_position_component(
     tags: Mapping[str, object] | None,
     keys: Sequence[str],
-) -> tuple[int | None, FieldReadState, str | None]:
+) -> TagReadResult[int | None]:
     """Compare every repeat/alias numerically instead of choosing dictionary order."""
     # Equivalent spellings such as "02" and "2" agree numerically. Different
     # totals across aliases must remain unreadable until the user resolves them.
     numbers: set[int] = set()
 
     for key in keys:
-        values, state, detail = _read_text_values(tags, (key,))
+        text_read = _read_text_values(tags, (key,))
 
-        if state is FieldReadState.UNREADABLE:
-            return None, state, detail
+        if text_read.read_state is FieldReadState.UNREADABLE:
+            return TagReadResult(None, text_read.read_state, text_read.detail)
 
         try:
-            numbers.update(int(value) for value in values)
+            numbers.update(int(value) for value in text_read.value)
         except ValueError:
-            return None, FieldReadState.UNREADABLE, f"Invalid numeric {key} value"
+            return TagReadResult(None, FieldReadState.UNREADABLE, f"Invalid numeric {key} value")
 
     if len(numbers) > 1:
-        return None, FieldReadState.UNREADABLE, f"Conflicting values for {'/'.join(keys)}"
+        return TagReadResult(None, FieldReadState.UNREADABLE, f"Conflicting values for {'/'.join(keys)}")
 
     if not numbers:
-        return None, FieldReadState.MISSING, None
+        return TagReadResult(None, FieldReadState.MISSING)
 
-    return next(iter(numbers)), FieldReadState.PRESENT, None
+    return TagReadResult(next(iter(numbers)), FieldReadState.PRESENT)
 
 
 def _read_position(
     tags: Mapping[str, object] | None,
     number_keys: Sequence[str],
     total_keys: Sequence[str],
-) -> tuple[Position, FieldReadState, str | None]:
+) -> TagReadResult[Position]:
     # Number tags may contain either "1" or "1/2". Collect the two components
     # independently so an omitted side stays unknown, while every supplied
     # number and total must agree across repeats and separate total aliases.
@@ -154,12 +154,12 @@ def _read_position(
     totals: set[int] = set()
 
     for key in number_keys:
-        values, state, detail = _read_text_values(tags, (key,))
+        text_read = _read_text_values(tags, (key,))
 
-        if state is FieldReadState.UNREADABLE:
-            return Position(), state, detail
+        if text_read.read_state is FieldReadState.UNREADABLE:
+            return TagReadResult(Position(), text_read.read_state, text_read.detail)
 
-        for value in values:
+        for value in text_read.value:
             number_text, separator, total_text = value.partition("/")
 
             try:
@@ -173,7 +173,7 @@ def _read_position(
                 # negatives and malformed totals must never become missing data.
                 position = Position(number=number, total=inline_total)
             except ValueError as error:
-                return Position(), FieldReadState.UNREADABLE, f"Invalid {key} position: {error}"
+                return TagReadResult(Position(), FieldReadState.UNREADABLE, f"Invalid {key} position: {error}")
 
             if position.number is not None:
                 numbers.add(position.number)
@@ -183,26 +183,28 @@ def _read_position(
 
     # Separate total tags remain numeric-only. An inline total does not take
     # precedence over contradictory DISCTOTAL/TOTALDISCS (or track aliases).
-    total, total_state, total_detail = _read_position_component(tags, total_keys)
+    total_read = _read_position_component(tags, total_keys)
 
-    if total_state is FieldReadState.UNREADABLE:
-        return Position(), total_state, total_detail
+    if total_read.read_state is FieldReadState.UNREADABLE:
+        return TagReadResult(Position(), total_read.read_state, total_read.detail)
 
-    if total is not None:
-        totals.add(total)
+    if total_read.value is not None:
+        totals.add(total_read.value)
 
     if len(numbers) > 1 or len(totals) > 1:
-        return Position(), FieldReadState.UNREADABLE, f"Conflicting values for {'/'.join((*number_keys, *total_keys))}"
+        return TagReadResult(
+            Position(), FieldReadState.UNREADABLE, f"Conflicting values for {'/'.join((*number_keys, *total_keys))}"
+        )
 
     if not numbers and not totals:
-        return Position(), FieldReadState.MISSING, None
+        return TagReadResult(Position(), FieldReadState.MISSING)
 
     try:
         position = Position(number=next(iter(numbers), None), total=next(iter(totals), None))
     except (TypeError, ValueError) as error:
-        return Position(), FieldReadState.UNREADABLE, str(error)
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, str(error))
 
-    return position, FieldReadState.PRESENT, None
+    return TagReadResult(position, FieldReadState.PRESENT)
 
 
 def _read_issue(field: MetadataField, detail: str | None) -> Issue:
@@ -328,31 +330,31 @@ class FlacAdapter:
         multi_values: dict[MetadataField, tuple[str, ...]] = {}
 
         for field, key in _SINGLE_KEYS.items():
-            single_value, state, detail = _read_single_value(tags, key)
-            single_values[field] = single_value
-            states[field] = state
+            single_read = _read_single_value(tags, key)
+            single_values[field] = single_read.value
+            states[field] = single_read.read_state
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            if single_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, single_read.detail))
 
         for field, key in _MULTI_KEYS.items():
-            multi_value, state, detail = _read_text_values(tags, (key,))
-            multi_values[field] = multi_value
-            states[field] = state
+            multi_read = _read_text_values(tags, (key,))
+            multi_values[field] = multi_read.value
+            states[field] = multi_read.read_state
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            if multi_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, multi_read.detail))
 
-        track, track_state, track_detail = _read_position(tags, _TRACK_NUMBER_KEYS, _TRACK_TOTAL_KEYS)
-        disc, disc_state, disc_detail = _read_position(tags, _DISC_NUMBER_KEYS, _DISC_TOTAL_KEYS)
-        states[MetadataField.TRACK] = track_state
-        states[MetadataField.DISC] = disc_state
+        track_read = _read_position(tags, _TRACK_NUMBER_KEYS, _TRACK_TOTAL_KEYS)
+        disc_read = _read_position(tags, _DISC_NUMBER_KEYS, _DISC_TOTAL_KEYS)
+        states[MetadataField.TRACK] = track_read.read_state
+        states[MetadataField.DISC] = disc_read.read_state
 
-        if track_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.TRACK, track_detail))
+        if track_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.TRACK, track_read.detail))
 
-        if disc_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.DISC, disc_detail))
+        if disc_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.DISC, disc_read.detail))
 
         metadata = MetadataSnapshot(
             title=single_values[MetadataField.TITLE],
@@ -360,8 +362,8 @@ class FlacAdapter:
             album=single_values[MetadataField.ALBUM],
             album_artists=multi_values[MetadataField.ALBUM_ARTISTS],
             composers=multi_values[MetadataField.COMPOSERS],
-            track=track,
-            disc=disc,
+            track=track_read.value,
+            disc=disc_read.value,
             date=single_values[MetadataField.DATE],
             genres=multi_values[MetadataField.GENRES],
         )

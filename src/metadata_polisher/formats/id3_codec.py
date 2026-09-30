@@ -31,7 +31,7 @@ from metadata_polisher.domain.metadata import (
     MetadataSnapshot,
     Position,
 )
-from metadata_polisher.formats.base import VerificationResult
+from metadata_polisher.formats.base import TagReadResult, VerificationResult
 from metadata_polisher.formats.id3_policy import changed_frame_ids
 
 ID3_WRITE_VERSION = 4
@@ -92,11 +92,11 @@ class Id3TagReadResult:
 def _frame_values(
     tags: ID3Tags,
     frame_id: str,
-) -> tuple[tuple[str, ...], FieldReadState, str | None]:
+) -> TagReadResult[tuple[str, ...]]:
     frame = tags.get(frame_id)  # type: ignore[no-untyped-call]
 
     if frame is None:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
     # TCON.genres expands legacy numeric genre notation correctly. Other text
     # frames retain their native ID3v2.4 list values without slash splitting.
@@ -105,40 +105,40 @@ def _frame_values(
     except Exception as error:
         # Mutagen calculates TCON genres lazily, so malformed legacy values can
         # fail while the property is accessed rather than while the file loads.
-        return (), FieldReadState.UNREADABLE, str(error)
+        return TagReadResult((), FieldReadState.UNREADABLE, str(error))
 
     if not isinstance(raw_values, (list, tuple)):
-        return (), FieldReadState.UNREADABLE, f"{frame_id} did not contain a text sequence"
+        return TagReadResult((), FieldReadState.UNREADABLE, f"{frame_id} did not contain a text sequence")
 
     if frame_id == "TDRC":
         if any(not isinstance(value, (str, ID3TimeStamp)) for value in raw_values):
-            return (), FieldReadState.UNREADABLE, "TDRC contained a non-date value"
+            return TagReadResult((), FieldReadState.UNREADABLE, "TDRC contained a non-date value")
 
         values = tuple(str(value) for value in raw_values)
     else:
         if any(not isinstance(value, str) for value in raw_values):
-            return (), FieldReadState.UNREADABLE, f"{frame_id} contained a non-string value"
+            return TagReadResult((), FieldReadState.UNREADABLE, f"{frame_id} contained a non-string value")
 
         values = cast(tuple[str, ...], tuple(raw_values))
 
     values = tuple(value for value in values if value != "")
 
     if not values:
-        return (), FieldReadState.MISSING, None
+        return TagReadResult((), FieldReadState.MISSING)
 
-    return values, FieldReadState.PRESENT, None
+    return TagReadResult(values, FieldReadState.PRESENT)
 
 
 def _single_frame_value(
     tags: ID3Tags,
     frame_id: str,
-) -> tuple[str | None, FieldReadState, str | None]:
-    values, state, detail = _frame_values(tags, frame_id)
+) -> TagReadResult[str | None]:
+    frame_read = _frame_values(tags, frame_id)
 
-    if state is not FieldReadState.PRESENT:
-        return None, state, detail
+    if frame_read.read_state is not FieldReadState.PRESENT:
+        return TagReadResult(None, frame_read.read_state, frame_read.detail)
 
-    return values[0], state, None
+    return TagReadResult(frame_read.value[0], frame_read.read_state)
 
 
 def _parse_position(value: str) -> Position:
@@ -161,16 +161,16 @@ def _parse_position(value: str) -> Position:
 def _read_position(
     tags: ID3Tags,
     frame_id: str,
-) -> tuple[Position, FieldReadState, str | None]:
-    values, state, detail = _frame_values(tags, frame_id)
+) -> TagReadResult[Position]:
+    frame_read = _frame_values(tags, frame_id)
 
-    if state is not FieldReadState.PRESENT:
-        return Position(), state, detail
+    if frame_read.read_state is not FieldReadState.PRESENT:
+        return TagReadResult(Position(), frame_read.read_state, frame_read.detail)
 
     try:
-        return _parse_position(values[0]), FieldReadState.PRESENT, None
+        return TagReadResult(_parse_position(frame_read.value[0]), FieldReadState.PRESENT)
     except (TypeError, ValueError) as error:
-        return Position(), FieldReadState.UNREADABLE, str(error)
+        return TagReadResult(Position(), FieldReadState.UNREADABLE, str(error))
 
 
 def _read_issue(field: MetadataField, detail: str | None) -> Issue:
@@ -222,21 +222,25 @@ def _write_version(tags: ID3Tags) -> int:
     return int(original[1])
 
 
-def _read_v23_date(tags: ID3Tags) -> tuple[str | None, FieldReadState, str | None]:
+def _read_v23_date(tags: ID3Tags) -> TagReadResult[str | None]:
     # v2.3 stores year, day/month and time separately. Reconstruct only the
     # precision actually present; a missing year cannot anchor the other parts.
-    year, year_state, year_detail = _single_frame_value(tags, "TYER")
-    day_month, day_state, day_detail = _single_frame_value(tags, "TDAT")
-    time, time_state, time_detail = _single_frame_value(tags, "TIME")
+    year_read = _single_frame_value(tags, "TYER")
+    day_read = _single_frame_value(tags, "TDAT")
+    time_read = _single_frame_value(tags, "TIME")
 
-    if FieldReadState.UNREADABLE in (year_state, day_state, time_state):
-        return None, FieldReadState.UNREADABLE, year_detail or day_detail or time_detail
+    if FieldReadState.UNREADABLE in (year_read.read_state, day_read.read_state, time_read.read_state):
+        return TagReadResult(None, FieldReadState.UNREADABLE, year_read.detail or day_read.detail or time_read.detail)
+
+    year = year_read.value
+    day_month = day_read.value
+    time = time_read.value
 
     if year is None:
         if day_month is not None or time is not None:
-            return None, FieldReadState.UNREADABLE, "ID3v2.3 date/time is present without its year"
+            return TagReadResult(None, FieldReadState.UNREADABLE, "ID3v2.3 date/time is present without its year")
 
-        return None, FieldReadState.MISSING, None
+        return TagReadResult(None, FieldReadState.MISSING)
 
     try:
         datetime.strptime(year, "%Y")
@@ -261,9 +265,9 @@ def _read_v23_date(tags: ID3Tags) -> tuple[str | None, FieldReadState, str | Non
             value += f"T{time[:2]}:{time[2:]}"
 
     except ValueError as error:
-        return None, FieldReadState.UNREADABLE, str(error)
+        return TagReadResult(None, FieldReadState.UNREADABLE, str(error))
 
-    return value, FieldReadState.PRESENT, None
+    return TagReadResult(value, FieldReadState.PRESENT)
 
 
 def _validate_v23_date(value: object) -> None:
@@ -375,33 +379,34 @@ class Id3TagCodec:
 
         for field, frame_id in _SINGLE_FRAME_IDS.items():
             if field is MetadataField.DATE and getattr(tags, "version", (2, 4, 0))[:2] == (2, 3):
-                single_value, state, detail = _read_v23_date(tags)
+                single_read = _read_v23_date(tags)
             else:
-                single_value, state, detail = _single_frame_value(tags, frame_id)
-            single_values[field] = single_value
-            states[field] = state
+                single_read = _single_frame_value(tags, frame_id)
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            single_values[field] = single_read.value
+            states[field] = single_read.read_state
+
+            if single_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, single_read.detail))
 
         for field, frame_id in _MULTI_FRAME_IDS.items():
-            multi_value, state, detail = _frame_values(tags, frame_id)
-            multi_values[field] = multi_value
-            states[field] = state
+            multi_read = _frame_values(tags, frame_id)
+            multi_values[field] = multi_read.value
+            states[field] = multi_read.read_state
 
-            if state is FieldReadState.UNREADABLE:
-                issues.append(_read_issue(field, detail))
+            if multi_read.read_state is FieldReadState.UNREADABLE:
+                issues.append(_read_issue(field, multi_read.detail))
 
-        track, track_state, track_detail = _read_position(tags, "TRCK")
-        disc, disc_state, disc_detail = _read_position(tags, "TPOS")
-        states[MetadataField.TRACK] = track_state
-        states[MetadataField.DISC] = disc_state
+        track_read = _read_position(tags, "TRCK")
+        disc_read = _read_position(tags, "TPOS")
+        states[MetadataField.TRACK] = track_read.read_state
+        states[MetadataField.DISC] = disc_read.read_state
 
-        if track_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.TRACK, track_detail))
+        if track_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.TRACK, track_read.detail))
 
-        if disc_state is FieldReadState.UNREADABLE:
-            issues.append(_read_issue(MetadataField.DISC, disc_detail))
+        if disc_read.read_state is FieldReadState.UNREADABLE:
+            issues.append(_read_issue(MetadataField.DISC, disc_read.detail))
 
         metadata = MetadataSnapshot(
             title=single_values[MetadataField.TITLE],
@@ -409,8 +414,8 @@ class Id3TagCodec:
             album=single_values[MetadataField.ALBUM],
             album_artists=multi_values[MetadataField.ALBUM_ARTISTS],
             composers=multi_values[MetadataField.COMPOSERS],
-            track=track,
-            disc=disc,
+            track=track_read.value,
+            disc=disc_read.value,
             date=single_values[MetadataField.DATE],
             genres=multi_values[MetadataField.GENRES],
         )

@@ -1,5 +1,10 @@
+import errno
+import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import pytest
 
 from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import (
@@ -45,6 +50,7 @@ class FakeReadAdapter:
     result: MediaReadResult | None = None
     error: Exception | None = None
     read_paths: list[Path] = field(default_factory=list)
+    after_read: Callable[[], None] | None = None
 
     def read(self, path: Path) -> MediaReadResult:
         self.read_paths.append(path)
@@ -53,6 +59,10 @@ class FakeReadAdapter:
             raise self.error
 
         assert self.result is not None
+
+        if self.after_read is not None:
+            self.after_read()
+
         return self.result
 
 
@@ -166,6 +176,7 @@ def test_scan_distinguishes_corrupt_supported_files_from_known_unsupported_files
     assert str(corrupt) in result.issues[0].message
     assert str(unreadable) in result.issues[1].message
     assert "invalid frame size" in (result.issues[1].technical_detail or "")
+    assert result.complete
 
 
 def test_scan_keeps_file_with_field_level_read_issue_and_contextualises_warning(
@@ -230,3 +241,126 @@ def test_scan_result_defensively_normalises_sequences_to_tuples() -> None:
     assert result.supported_files == ()
     assert result.unsupported_files == ()
     assert result.issues == ()
+
+
+def test_scan_reports_inaccessible_subfolder_without_discarding_readable_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readable = tmp_path / "01-readable.flac"
+    inaccessible = tmp_path / "locked"
+    touch(readable)
+    touch(inaccessible / "02-hidden.flac")
+    scandir = os.scandir
+
+    def deny_directory(path: str | os.PathLike[str]) -> object:
+        if Path(path) == inaccessible:
+            raise PermissionError(errno.EACCES, "directory access denied", str(inaccessible))
+
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", deny_directory)
+    registry = FakeRegistry(
+        routes={readable: FakeReadAdapter("flac", make_read_result("Readable"))},
+        supported_extensions=frozenset({".flac"}),
+    )
+
+    result = scan_media(tmp_path, registry)
+
+    # Readable evidence is useful for diagnostics, but an unseen subtree means
+    # this snapshot cannot replace an existing, complete library review.
+    assert tuple(file.path for file in result.supported_files) == (readable,)
+    assert len(result.issues) == 1
+    assert result.issues[0].code is MediaErrorCode.PERMISSION_DENIED
+    assert str(inaccessible) in result.issues[0].message
+    assert "directory access denied" in (result.issues[0].technical_detail or "")
+    assert not result.complete
+
+
+def test_scan_reports_file_stat_failure_instead_of_silently_omitting_the_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unreadable = tmp_path / "01-unreadable.flac"
+    touch(unreadable)
+    stat = Path.stat
+
+    def deny_file_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path == unreadable:
+            raise PermissionError("file access denied")
+
+        return stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", deny_file_stat)
+    registry = FakeRegistry(routes={}, supported_extensions=frozenset({".flac"}))
+
+    result = scan_media(tmp_path, registry)
+
+    assert result.supported_files == ()
+    assert len(result.issues) == 1
+    assert result.issues[0].code is MediaErrorCode.PERMISSION_DENIED
+    assert str(unreadable) in result.issues[0].message
+    assert not result.complete
+
+
+def test_scan_reports_missing_root_as_an_incomplete_scan(tmp_path: Path) -> None:
+    missing = tmp_path / "removed"
+    registry = FakeRegistry(routes={}, supported_extensions=frozenset({".flac"}))
+
+    result = scan_media(missing, registry)
+
+    assert result.supported_files == ()
+    assert len(result.issues) == 1
+    assert str(missing) in result.issues[0].message
+    assert "FileNotFoundError" in (result.issues[0].technical_detail or "")
+    assert not result.complete
+
+
+def test_scan_captures_the_version_of_the_file_it_read(tmp_path: Path) -> None:
+    path = tmp_path / "01-stable.flac"
+    touch(path)
+    registry = FakeRegistry(
+        routes={path: FakeReadAdapter("flac", make_read_result("Stable"))},
+        supported_extensions=frozenset({".flac"}),
+    )
+
+    result = scan_media(tmp_path, registry)
+    stat = path.stat()
+
+    assert result.supported_files[0].file_version == (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+    assert result.issues == ()
+
+
+def test_scan_omits_metadata_from_a_file_changed_during_the_read(tmp_path: Path) -> None:
+    path = tmp_path / "01-changing.flac"
+    touch(path)
+
+    def external_edit() -> None:
+        path.write_bytes(b"externally changed metadata")
+
+    registry = FakeRegistry(
+        routes={
+            path: FakeReadAdapter(
+                "flac",
+                make_read_result("Stale title"),
+                after_read=external_edit,
+            )
+        },
+        supported_extensions=frozenset({".flac"}),
+    )
+
+    result = scan_media(tmp_path, registry)
+
+    # A known file that changes while being read is an isolated media problem,
+    # rather than evidence that an entire directory was silently skipped.
+    assert result.supported_files == ()
+    assert len(result.issues) == 1
+    assert result.issues[0].code.value == "SOURCE_CHANGED"
+    assert str(path) in result.issues[0].message
+    assert result.complete

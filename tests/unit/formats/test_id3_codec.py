@@ -5,12 +5,15 @@ from mutagen.id3 import (
     TALB,
     TCOM,
     TCON,
+    TDAT,
     TDRC,
+    TIME,
     TIT2,
     TPE1,
     TPE2,
     TPOS,
     TRCK,
+    TYER,
 )
 
 from metadata_polisher.domain.errors import MediaErrorCode
@@ -97,6 +100,43 @@ def test_id3_codec_converts_genre_property_failure_to_unreadable_issue() -> None
     assert result.metadata.genres == ()
     assert result.field_states[MetadataField.GENRES] is FieldReadState.UNREADABLE
     assert any(issue.code is MediaErrorCode.TAG_READ_FAILED for issue in result.issues)
+
+
+@pytest.mark.parametrize(
+    ("year", "day_month", "time", "expected", "state", "detail"),
+    (
+        ("2024", "2902", "1234", "2024-02-29T12:34", FieldReadState.PRESENT, None),
+        (None, None, None, None, FieldReadState.MISSING, None),
+        (None, "2902", None, None, FieldReadState.UNREADABLE, "without its year"),
+        ("2024", None, "1234", None, FieldReadState.UNREADABLE, "requires a complete day"),
+    ),
+)
+def test_id3_v23_date_retains_precision_and_missing_component_diagnostics(
+    year, day_month, time, expected, state, detail,
+) -> None:
+    class LegacyTags(dict):
+        version = (2, 3, 0)
+
+    tags = LegacyTags()
+
+    for frame_id, frame_type, value in (("TYER", TYER, year), ("TDAT", TDAT, day_month), ("TIME", TIME, time)):
+        if value is not None:
+            tags[frame_id] = frame_type(encoding=0, text=[value])
+
+    # Use native text frames but supply the original version separately, as the
+    # codec must reconstruct v2.3 components without fabricating missing parts.
+    result = Id3TagCodec().read(tags)  # type: ignore[arg-type]
+
+    assert result.metadata.date == expected
+    assert result.field_states[MetadataField.DATE] is state
+    assert result.field_states[MetadataField.TITLE] is FieldReadState.MISSING
+
+    if detail is None:
+        assert result.issues == ()
+    else:
+        assert len(result.issues) == 1
+        assert "date metadata" in result.issues[0].message
+        assert detail in result.issues[0].technical_detail
 
 
 def test_id3_read_result_rejects_incomplete_field_states() -> None:

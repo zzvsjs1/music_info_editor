@@ -140,11 +140,11 @@ def test_r5_duplicate_tags_preserve_caller_order_with_explicit_notice() -> None:
         ))
         for file in reversed(files)
     )
-    ordered, notice = order_local_track_files(duplicated)
+    ordered = order_local_track_files(duplicated)
 
-    assert ordered == duplicated
-    assert notice is not None
-    assert notice.code is MatchReasonCode.LOCAL_TRACK_ORDER_AMBIGUOUS
+    assert ordered.files == duplicated
+    assert ordered.notice is not None
+    assert ordered.notice.code is MatchReasonCode.LOCAL_TRACK_ORDER_AMBIGUOUS
 
 
 def test_r5_genuine_same_track_duration_conflict_requires_review() -> None:

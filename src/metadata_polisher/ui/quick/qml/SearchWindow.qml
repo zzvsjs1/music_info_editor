@@ -103,7 +103,6 @@ ApplicationWindow {
                 AppSpinBox {
                     id: year
                     objectName: "quickSearchYear"
-                    from: 0
                     to: 9999
                     editable: true
                     textFromValue: function(value) {

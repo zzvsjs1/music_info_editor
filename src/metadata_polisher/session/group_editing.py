@@ -125,7 +125,10 @@ def merge_session_groups(
     return _install_groups(state, groups, retained, rename_settings)
 
 
-def set_disc_override(state: SessionState, group_id: str, number: int | None) -> SessionState:
+def set_disc_override(
+    state: SessionState, group_id: str, number: int | None,
+    rename_settings: RenameSettings = _DEFAULT_RENAME_SETTINGS,
+) -> SessionState:
     """Change lookup evidence, leaving original media tags untouched."""
     _require_idle(state)
     current = next((item for item in state.groups if item.group.group_id == group_id), None)
@@ -136,8 +139,8 @@ def set_disc_override(state: SessionState, group_id: str, number: int | None) ->
     if current.disc_number_override == number:
         return state
 
-    # A new disc hint changes matching evidence. Construct fresh downstream
-    # state rather than carrying a ranking calculated for the previous hint.
+    # A new disc hint invalidates the release and track evidence. Independent
+    # local decisions and filename intent still belong to the same stable files.
     replacement = GroupState(
         group=current.group,
         warnings=current.warnings,
@@ -145,10 +148,17 @@ def set_disc_override(state: SessionState, group_id: str, number: int | None) ->
         disc_number_override=number,
         search_query_override=current.search_query_override,
         requires_rescan=current.requires_rescan,
+        reviewed_files=local_reviews_after_lookup_reset(state, current, rename_settings),
         revision=current.revision + 1,
     )
-    return replace(
+    staged = replace(
         state,
         groups=tuple(replacement if item is current else item for item in state.groups),
         revision=state.revision + 1,
     )
+
+    # Project Undo through the same local-only boundary so it can reverse manual
+    # decisions without bringing an obsolete provider proposal or mapping back.
+    affected_file_ids = frozenset(source.file_id for source in current.group.files)
+
+    return replace(staged, review_undo=regrouped_review_undo(staged, affected_file_ids, rename_settings))

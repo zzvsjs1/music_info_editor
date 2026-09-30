@@ -1,6 +1,8 @@
 # Local placeholder files exercise discovery while injected adapters supply tags.
 # This isolates scan/group/progress composition from real audio decoding.
 
+import errno
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -325,3 +327,42 @@ def test_scan_library_checks_cancellation_between_scanning_and_grouping() -> Non
         )
 
     assert calls == ["scan"]
+
+
+def test_scan_library_fails_before_grouping_when_directory_enumeration_is_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scandir = os.scandir
+    grouped: list[LocalMediaFile] = []
+    events = RecordingEventSink()
+
+    def deny_root(path: str | os.PathLike[str]) -> object:
+        if Path(path) == tmp_path:
+            raise PermissionError(errno.EACCES, "directory access denied", str(tmp_path))
+
+        return scandir(path)
+
+    def grouper(files: tuple[LocalMediaFile, ...]) -> GroupingResult:
+        grouped.extend(files)
+        pytest.fail("An incomplete scan must not produce a replacement library result.")
+
+    monkeypatch.setattr(os, "scandir", deny_root)
+    service = ScanLibraryService(FakeRegistry({}), grouper=grouper)
+
+    # A worker failure uses the existing terminal path, which preserves the
+    # previous session and keeps its failed scan diagnostics visible.
+    with pytest.raises(OSError, match="directory access denied"):
+        service.scan_library(
+            operation_id="SCAN-0013",
+            base_session_revision=0,
+            base_library_revision=0,
+            root=tmp_path,
+            events=events,
+        )
+
+    assert grouped == []
+    assert all(
+        event.stage is ScanLibraryStage.SCANNING_FILES
+        for event in events.events
+    )

@@ -106,9 +106,95 @@ def test_invalid_settings_remain_open_and_leave_state_unchanged(settings, key, v
     facade.setField(key, value)
     assert not facade.save()
     assert facade.opened
-    assert message.lower() in facade.error.lower()
+    field = "backupDirectory" if key == "backupEnabled" else key
+    assert message.lower() in facade.fieldErrors[field].lower()
+    assert facade.error == ""
     assert host.session_state is original
     assert not host.settings_file.exists()
+
+
+def test_save_reports_all_field_errors_and_preserves_the_invalid_draft(settings):
+    host, facade = settings
+    facade.open()
+    facade.setField("template", "%unknown%")
+    facade.setField("backupEnabled", True)
+    facade.setField("networkMode", "manual_proxy")
+    facade.setField("proxyHost", "http://invalid-host")
+    facade.setField("proxyPort", 0)
+    original_settings, original_state = host.app_settings, host.session_state
+
+    assert not facade.save()
+    assert set(facade.fieldErrors) == {"template", "backupDirectory", "proxyHost", "proxyPort"}
+    assert facade.error == ""
+    assert facade.draft["template"] == "%unknown%"
+    assert facade.draft["proxyHost"] == "http://invalid-host"
+    assert host.app_settings is original_settings
+    assert host.session_state is original_state
+    assert not host.settings_file.exists()
+
+
+def test_editing_one_invalid_field_revalidates_only_that_field(settings):
+    _host, facade = settings
+    facade.open()
+    facade.setField("template", "%unknown%")
+    facade.setField("backupEnabled", True)
+    assert not facade.save()
+    backup_error = facade.fieldErrors["backupDirectory"]
+
+    facade.setField("template", "%still_unknown%")
+    assert "template" in facade.fieldErrors
+    assert facade.fieldErrors["backupDirectory"] == backup_error
+
+    facade.setField("template", "%title%")
+    assert facade.fieldErrors == {"backupDirectory": backup_error}
+
+
+def test_field_validation_waits_for_blur_and_rechecks_conditional_errors(settings):
+    _host, facade = settings
+    facade.open()
+    facade.setField("template", "%unknown%")
+    assert facade.fieldErrors == {}
+    facade.validateField("template")
+    assert "template" in facade.fieldErrors
+
+    facade.setField("backupEnabled", True)
+    facade.setField("networkMode", "manual_proxy")
+    assert not facade.save()
+    assert {"backupDirectory", "proxyHost"} <= set(facade.fieldErrors)
+
+    facade.setField("backupEnabled", False)
+    facade.setField("networkMode", "direct")
+    assert set(facade.fieldErrors) == {"template"}
+
+
+def test_field_edits_do_not_hide_an_atomic_save_error(settings, monkeypatch):
+    _host, facade = settings
+    facade.open()
+
+    def fail_save(*args):
+        raise PermissionError("Read-only settings location")
+
+    monkeypatch.setattr("metadata_polisher.ui.quick.settings.save_settings", fail_save)
+    assert not facade.save()
+    operation_error = facade.error
+    facade.setField("template", "%title%")
+    assert facade.error == operation_error
+    assert facade.fieldErrors == {}
+
+
+@pytest.mark.parametrize("name,path", (("Encoder", "encoder.exe"), ("", "")))
+def test_tool_edits_do_not_hide_an_atomic_save_error(settings, monkeypatch, name, path):
+    _host, facade = settings
+    facade.open()
+
+    def fail_save(*args):
+        raise PermissionError("Read-only settings location")
+
+    monkeypatch.setattr("metadata_polisher.ui.quick.settings.save_settings", fail_save)
+    assert not facade.save()
+    operation_error = facade.error
+    facade.addTool(name, path)
+    assert facade.error == operation_error
 
 
 def test_atomic_save_failure_does_not_publish_prepared_preferences(settings, monkeypatch):

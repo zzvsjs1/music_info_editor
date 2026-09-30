@@ -2,9 +2,12 @@
 
 import struct
 
+import pytest
 from mutagen.apev2 import APEv2
 
+from metadata_polisher.domain.errors import MediaErrorCode
 from metadata_polisher.domain.metadata import MetadataChange, MetadataField, Position
+from metadata_polisher.formats.base import MediaFormatError
 from metadata_polisher.formats.tak import TakAdapter
 from tests.unit.formats.test_tak import FakeTakFile
 
@@ -58,3 +61,43 @@ def test_ape_raw_keys_text_values_and_binary_items_follow_documented_conventions
     assert raw["Year"] == (0, b"2024-02")
     assert "Date" not in raw
     assert raw["Cover Art (Front)"] == (2, b"cover.png\x00binary sentinel")
+
+
+@pytest.mark.parametrize("tail_kind", ("id3v1", "lyrics3_id3v1", "lyrics3"))
+def test_ape_edits_block_unmanaged_legacy_tails_before_mutagen_can_remove_them(tmp_path, tail_kind) -> None:
+    path = tmp_path / "legacy-tail.ape"
+    tags = APEv2()
+    tags["Title"] = "Original title"
+    tags.save(path)
+    id3v1 = b"TAG" + b"Unmanaged ID3v1 sentinel".ljust(125, b"\x00")
+    lyrics = b"LYRICSBEGIN" + b"Unmanaged Lyrics3 sentinel"
+    lyrics3 = lyrics + f"{len(lyrics):06d}".encode("ascii") + b"LYRICS200"
+    tail = id3v1 if tail_kind == "id3v1" else lyrics3 + (id3v1 if tail_kind == "lyrics3_id3v1" else b"")
+
+    with path.open("ab") as target:
+        target.write(tail)
+
+    original = path.read_bytes()
+
+    class PersistedApeFile(FakeTakFile):
+        def save(self):
+            self.save_calls += 1
+            self.tags.save(path)
+
+    audio = PersistedApeFile(APEv2(path))
+    adapter = TakAdapter(loader=lambda _: audio)
+
+    # Existing legacy blocks are outside the managed APE fields. Blocking the
+    # edit is safer than relying on a save which truncates everything after APE.
+    with pytest.raises(MediaFormatError, match="preserv.*(?:ID3v1|Lyrics3)") as blocked:
+        adapter.write_changes(path, (MetadataChange(MetadataField.TITLE, "Original title", "Reviewed title"),))
+
+    assert blocked.value.issue.code is MediaErrorCode.TAG_WRITE_FAILED
+    assert audio.save_calls == 0
+    assert str(audio.tags["Title"]) == "Original title"
+    assert path.read_bytes() == original
+
+    # No metadata edit, including a rename-only transaction, must invoke the
+    # preservation blocker or rewrite any of the original tag bytes.
+    adapter.write_changes(path, ())
+    assert path.read_bytes() == original

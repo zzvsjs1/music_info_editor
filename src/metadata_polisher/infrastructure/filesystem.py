@@ -6,6 +6,14 @@ import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from metadata_polisher.domain.media import FileVersion
+
+
+def read_file_version(path: Path) -> FileVersion:
+    """Capture identity and modification facts without reading the media bytes."""
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
 
 class FileSystem(Protocol):
     """Only the filesystem operations whose failures affect transaction safety."""
@@ -34,7 +42,7 @@ class LocalFileSystem:
         # A sibling stays on the source volume, allowing the final replacement
         # to use the filesystem's atomic move rather than a cross-volume copy.
         descriptor, raw_path = tempfile.mkstemp(
-            prefix=f".{source.stem}.metadata-polisher-",
+            prefix=".metadata-polisher-",
             suffix=source.suffix,
             dir=source.parent,
         )

@@ -14,7 +14,7 @@ from metadata_polisher.application.changes import (
 )
 from metadata_polisher.domain.matching import ComposerCredit, CreditScope, MetadataProvenance, ReleaseCandidate
 from metadata_polisher.domain.media import LocalMediaFile
-from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position
+from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position, metadata_value
 from metadata_polisher.domain.review import (
     ConsolidatedProposal,
     DecisionOrigin,
@@ -847,20 +847,7 @@ def _representative_provenance(selected: CoordinatedCandidate) -> MetadataProven
 
 
 def _metadata_value(file: LocalMediaFile, field: MetadataField) -> FieldValue | None:
-    metadata = file.read_result.metadata
-    values: dict[MetadataField, FieldValue | None] = {
-        MetadataField.TITLE: metadata.title,
-        MetadataField.ARTISTS: metadata.artists,
-        MetadataField.ALBUM: metadata.album,
-        MetadataField.ALBUM_ARTISTS: metadata.album_artists,
-        MetadataField.COMPOSERS: metadata.composers,
-        MetadataField.TRACK: metadata.track,
-        MetadataField.DISC: metadata.disc,
-        MetadataField.DATE: metadata.date,
-        MetadataField.GENRES: metadata.genres,
-    }
-
-    return values[field]
+    return metadata_value(file.read_result.metadata, field)
 
 
 def _existing_value(file: LocalMediaFile, field: MetadataField) -> FieldValue | None:
@@ -1338,9 +1325,9 @@ def set_manual_track_assignment(
             f"User left local file {local_file_id} unmapped; it receives no track-specific provider proposals.",
         )
 
-    ordered_files, order_notice = order_local_track_files(copied_files)
-    updated_mappings = tuple(mapped_by_id[file.file_id] for file in ordered_files if file.file_id in mapped_by_id)
-    unmatched_local = tuple(file.file_id for file in ordered_files if file.file_id not in mapped_by_id)
+    ordered = order_local_track_files(copied_files)
+    updated_mappings = tuple(mapped_by_id[file.file_id] for file in ordered.files if file.file_id in mapped_by_id)
+    unmatched_local = tuple(file.file_id for file in ordered.files if file.file_id not in mapped_by_id)
     used_provider = {item.provider_track_index for item in updated_mappings}
     unmatched_provider = tuple(index for index in range(len(medium.tracks)) if index not in used_provider)
     complete = bool(updated_mappings) and not unmatched_local and not unmatched_provider
@@ -1369,8 +1356,8 @@ def set_manual_track_assignment(
             "The provider track or media listing is incomplete; confirming pairs does not establish missing rows.",
         ))
 
-    if order_notice is not None and order_notice.code not in retained_codes:
-        evidence = (*evidence, MatchEvidence(order_notice.code, 0.0, order_notice.detail))
+    if ordered.notice is not None and ordered.notice.code not in retained_codes:
+        evidence = (*evidence, MatchEvidence(ordered.notice.code, 0.0, ordered.notice.detail))
 
     summary = MatchEvidence(
         MatchReasonCode.TRACK_MAPPING_COMPLETE if complete else MatchReasonCode.TRACK_MAPPING_PARTIAL,

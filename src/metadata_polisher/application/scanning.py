@@ -171,6 +171,16 @@ class ScanLibraryService:
             on_progress=emit_scan_progress,
         )
         active_cancellation.raise_if_cancelled()
+
+        if not scan_result.complete:
+            # Use the existing worker-failure path so an incomplete directory
+            # snapshot cannot clear current groups or pending review decisions.
+            detail = "\n".join(
+                f"{issue.message}\n{issue.technical_detail or ''}".rstrip()
+                for issue in scan_result.issues
+            )
+            raise OSError(f"The folder could not be scanned completely.\n{detail}")
+
         active_events.emit(OperationStageChanged(operation_id, ScanLibraryStage.GROUPING_FILES))
         active_events.emit(OperationProgress(operation_id, ScanLibraryStage.GROUPING_FILES, 0, 1))
         active_cancellation.raise_if_cancelled()

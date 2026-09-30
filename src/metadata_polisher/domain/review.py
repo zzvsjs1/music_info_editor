@@ -6,10 +6,7 @@ from enum import StrEnum
 
 from metadata_polisher.domain.matching import ComposerCredit, MetadataProvenance
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position
-
-# Review values preserve semantic types until a format adapter writes them.
-# An explicit CLEAR decision represents deletion; a missing proposal does not.
-type FieldValue = str | tuple[str, ...] | Position
+from metadata_polisher.domain.metadata import FieldValue as FieldValue
 
 
 class FieldDecisionKind(StrEnum):

@@ -21,7 +21,7 @@ from metadata_polisher.domain.media import LocalMediaFile, UnsupportedMediaFile
 from metadata_polisher.domain.metadata import (
     FieldReadState,
     MetadataField,
-    MetadataSnapshot,
+    metadata_value,
 )
 from metadata_polisher.domain.review import (
     FieldProposal,
@@ -194,22 +194,6 @@ class ReleaseSelectionState:
         return self.candidate.candidate.media[self.medium_index]
 
 
-def _metadata_value(metadata: MetadataSnapshot, field_name: MetadataField) -> FieldValue | None:
-    values: dict[MetadataField, FieldValue | None] = {
-        MetadataField.TITLE: metadata.title,
-        MetadataField.ARTISTS: metadata.artists,
-        MetadataField.ALBUM: metadata.album,
-        MetadataField.ALBUM_ARTISTS: metadata.album_artists,
-        MetadataField.COMPOSERS: metadata.composers,
-        MetadataField.TRACK: metadata.track,
-        MetadataField.DISC: metadata.disc,
-        MetadataField.DATE: metadata.date,
-        MetadataField.GENRES: metadata.genres,
-    }
-
-    return values[field_name]
-
-
 def _has_semantic_value(value: FieldValue | None) -> bool:
     if value is None:
         return False
@@ -235,7 +219,7 @@ def _validate_reviews_against_source(
                 f"review read state for {review.field.value} does not match the current source"
             )
 
-        source_value = _metadata_value(source.read_result.metadata, review.field)
+        source_value = metadata_value(source.read_result.metadata, review.field)
 
         if source_read_state is FieldReadState.MISSING:
             expected_existing: FieldValue | None = None

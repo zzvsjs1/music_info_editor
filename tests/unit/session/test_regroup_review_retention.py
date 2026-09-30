@@ -8,7 +8,7 @@ from metadata_polisher.application.changes import RenameDecision
 from metadata_polisher.domain.metadata import MetadataField
 from metadata_polisher.domain.review import DecisionOrigin, FieldDecisionKind, ReviewReasonCode
 from metadata_polisher.infrastructure.settings import RenameSettings
-from metadata_polisher.session.group_editing import merge_session_groups, split_session_group
+from metadata_polisher.session.group_editing import merge_session_groups, set_disc_override, split_session_group
 from metadata_polisher.session.review_editing import (
     apply_field_decision,
     review_undo_targets,
@@ -102,3 +102,56 @@ def test_merge_with_stale_group_rejects_before_discarding_healthy_manual_decisio
         merge_session_groups(state, ("album", "stale"))
 
     assert by_file(state)[file_id].change_set.final_metadata.title == "Retain this review"
+
+
+@pytest.mark.parametrize("decision,value", [
+    (FieldDecisionKind.USE_MANUAL, "Reviewed title"),
+    (FieldDecisionKind.CLEAR, None),
+    (FieldDecisionKind.KEEP_EXISTING, None),
+])
+def test_disc_hint_change_preserves_independent_review_and_filename_intent(decision, value):
+    state = make_selected_session()
+    source = state.groups[0].group.files[0]
+    settings = RenameSettings()
+    state = apply_field_decision(
+        state, "album", source.file_id, MetadataField.TITLE, decision, settings, manual_value=value,
+    )
+    state = set_rename_decision(state, "album", (source.file_id,), RenameDecision.APPLY_RENAME, settings)
+
+    changed = set_disc_override(state, "album", 2)
+    retained = by_file(changed)[source.file_id]
+    title = next(review for review in retained.reviews if review.field is MetadataField.TITLE)
+
+    assert title.decision is decision
+    assert title.decision_origin is DecisionOrigin.USER
+    assert title.manual_value == value
+    assert retained.change_set.rename_decision is RenameDecision.APPLY_RENAME
+    assert changed.groups[0].disc_number_override == 2
+    assert changed.groups[0].selected_release is None
+    assert changed.groups[0].effective_track_mapping is None
+    assert all(not review.proposals for review in retained.reviews)
+
+    # Independent actions remain undoable after the matching evidence changes.
+    # Undo must operate on local projections and cannot restore stale proposals.
+    undone = undo_last_review_action(changed, settings)
+    assert by_file(undone)[source.file_id].change_set.rename_decision is RenameDecision.KEEP_FILENAME
+    assert all(not review.proposals for item in by_file(undone).values() for review in item.reviews)
+
+
+def test_disc_hint_change_marks_candidate_approval_for_review_again():
+    state = make_selected_session()
+    source = state.groups[0].group.files[0]
+    state = apply_field_decision(
+        state, "album", source.file_id, MetadataField.TITLE, FieldDecisionKind.USE_PROPOSAL,
+        RenameSettings(), proposal_index=1,
+    )
+
+    changed = set_disc_override(state, "album", 2)
+    retained = by_file(changed)[source.file_id]
+    title = next(review for review in retained.reviews if review.field is MetadataField.TITLE)
+
+    assert title.decision is FieldDecisionKind.UNRESOLVED
+    assert title.requires_review
+    assert ReviewReasonCode.CANDIDATE_DEPENDENCY_CHANGED in title.reason_codes
+    assert not title.proposals
+    assert not review_undo_targets(changed)
