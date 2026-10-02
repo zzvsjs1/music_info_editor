@@ -10,10 +10,12 @@ from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import MediaReadResult, StreamInfo
 from metadata_polisher.domain.metadata import (
     FieldReadState,
+    FieldValue,
     MetadataChange,
     MetadataField,
     MetadataSnapshot,
     Position,
+    metadata_value,
 )
 from metadata_polisher.formats.base import MediaFormatError, TagReadResult, VerificationResult
 
@@ -288,11 +290,7 @@ def _change_requires_tag_block(change: MetadataChange) -> bool:
     return value.number is not None or value.total is not None
 
 
-def _metadata_value(snapshot: MetadataSnapshot, field: MetadataField) -> object:
-    return getattr(snapshot, field.value)
-
-
-def _expected_field_state(value: object) -> FieldReadState:
+def _expected_field_state(value: FieldValue | None) -> FieldReadState:
     if value is None or value == () or value == Position():
         return FieldReadState.MISSING
 
@@ -470,8 +468,8 @@ class FlacAdapter:
         issues: list[Issue] = []
 
         for field in sorted(changed_fields, key=lambda item: item.value):
-            expected_value = _metadata_value(expected, field)
-            actual_value = _metadata_value(actual.metadata, field)
+            expected_value = metadata_value(expected, field)
+            actual_value = metadata_value(actual.metadata, field)
             expected_state = _expected_field_state(expected_value)
             actual_state = actual.field_states[field]
 

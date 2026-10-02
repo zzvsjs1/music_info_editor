@@ -171,7 +171,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Escape"
-        enabled: root.active && !suggestions.opened
+        enabled: root.active && !templateEdit.suggestionsOpen
         onActivated: settings.reject()
     }
 
@@ -179,13 +179,13 @@ ApplicationWindow {
     // the current index also reveals an overflowed tab through TabBar's view.
     Shortcut {
         sequence: "Ctrl+Tab"
-        enabled: root.visible && root.active && !suggestions.opened
+        enabled: root.visible && root.active && !templateEdit.suggestionsOpen
         onActivated: tabs.currentIndex = (tabs.currentIndex + 1) % tabs.count
     }
 
     Shortcut {
         sequence: "Ctrl+Shift+Tab"
-        enabled: root.visible && root.active && !suggestions.opened
+        enabled: root.visible && root.active && !templateEdit.suggestionsOpen
         onActivated: tabs.currentIndex = (tabs.currentIndex + tabs.count - 1) % tabs.count
     }
 
@@ -205,24 +205,24 @@ ApplicationWindow {
         // A failed submission reveals the first invalid field across tabs.
         // Wait for the page switch and layout polish before scrolling/focusing.
         const fields = [
-            ["template", 0, templateEdit, renameScroll],
-            ["trackDigits", 0, trackDigits.inputControl, renameScroll],
-            ["discDigits", 0, discDigits.inputControl, renameScroll],
-            ["preferredLanguage", 1, languageEdit.inputControl, providerScroll],
-            ["networkMode", 2, routeEdit, networkScroll],
-            ["proxyHost", 2, proxyHostEdit.inputControl, networkScroll],
-            ["proxyPort", 2, proxyPortEdit.inputControl, networkScroll],
-            ["backupDirectory", 3, backupEdit.inputControl, outputScroll]
+            {key: "template", tab: renamingTab, editor: templateEdit, scrollView: renameScroll},
+            {key: "trackDigits", tab: renamingTab, editor: trackDigits.inputControl, scrollView: renameScroll},
+            {key: "discDigits", tab: renamingTab, editor: discDigits.inputControl, scrollView: renameScroll},
+            {key: "preferredLanguage", tab: providersTab, editor: languageEdit.inputControl, scrollView: providerScroll},
+            {key: "networkMode", tab: networkTab, editor: routeEdit, scrollView: networkScroll},
+            {key: "proxyHost", tab: networkTab, editor: proxyHostEdit.inputControl, scrollView: networkScroll},
+            {key: "proxyPort", tab: networkTab, editor: proxyPortEdit.inputControl, scrollView: networkScroll},
+            {key: "backupDirectory", tab: outputTab, editor: backupEdit.inputControl, scrollView: outputScroll}
         ]
 
         for (const field of fields) {
-            if (!(settings.fieldErrors[field[0]] || ""))
+            if (!(settings.fieldErrors[field.key] || ""))
                 continue
 
-            tabs.currentIndex = field[1]
+            tabs.currentIndex = field.tab.TabBar.index
             Qt.callLater(function() {
-                const control = field[2]
-                const viewport = field[3].contentItem
+                const control = field.editor
+                const viewport = field.scrollView.contentItem
                 const top = control.mapToItem(viewport.contentItem, 0, 0).y
                 viewport.contentY = Math.max(0, Math.min(top,
                     viewport.contentHeight - viewport.height))
@@ -295,21 +295,25 @@ ApplicationWindow {
                 // Overflow stays inside this viewport while keyboard tab
                 // switching keeps the active label visible.
                 SettingsTabButton {
+                    id: renamingTab
                     objectName: "renamingTab"
                     text: "Renaming"
                 }
 
                 SettingsTabButton {
+                    id: providersTab
                     objectName: "providersTab"
                     text: "Providers and language"
                 }
 
                 SettingsTabButton {
+                    id: networkTab
                     objectName: "networkTab"
                     text: "Network and session login"
                 }
 
                 SettingsTabButton {
+                    id: outputTab
                     objectName: "outputTab"
                     text: "Backups, reports and diagnostics"
                 }
@@ -372,96 +376,11 @@ ApplicationWindow {
                             Layout.minimumWidth: 0
                             errorText: settings.fieldErrors.template || ""
 
-                            editor: AppTextField {
+                            editor: TemplateTextField {
                                 id: templateEdit
                                 objectName: "settingsTemplate"
                                 anchors.fill: parent
-                                text: settings.draft.template
-                                selectByMouse: true
-                                property var completion: ({})
-
-                                function refreshCompletions() {
-                                    completion = selectionStart === selectionEnd
-                                        ? settings.templateCompletion(text, cursorPosition) : ({})
-
-                                    if (completion.options && completion.options.length) {
-                                        suggestionList.currentIndex = 0
-                                        suggestions.open()
-                                    } else {
-                                        suggestions.close()
-                                    }
-                                }
-
-                                function acceptCompletion(token) {
-                                    const start = completion.start
-                                    const end = completion.end
-                                    suggestions.close()
-                                    remove(start, end)
-                                    insert(start, token)
-                                    cursorPosition = start + token.length
-                                    settings.setField("template", text)
-                                }
-
-                                onTextEdited: {
-                                    settings.setField("template", text)
-                                    refreshCompletions()
-                                }
-
-                                onEditingFinished: settings.validateField("template")
-                                Accessible.name: "Filename template"
-                                Accessible.description: settings.fieldErrors.template || ""
-
-                                onCursorPositionChanged: {
-                                    if (suggestions.opened)
-                                        refreshCompletions()
-                                }
-
-                                Keys.onPressed: function(event) {
-                                    if (event.key === Qt.Key_Space && event.modifiers === Qt.ControlModifier) {
-                                        refreshCompletions()
-                                        event.accepted = true
-                                    } else if (suggestions.opened) {
-                                        if (event.key === Qt.Key_Escape) {
-                                            suggestions.close()
-                                            event.accepted = true
-                                        } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
-                                            const step = event.key === Qt.Key_Down ? 1 : -1
-                                            suggestionList.currentIndex = (suggestionList.currentIndex + step
-                                                + suggestionList.count) % suggestionList.count
-                                            event.accepted = true
-                                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
-                                                   || event.key === Qt.Key_Tab) {
-                                            acceptCompletion(completion.options[suggestionList.currentIndex])
-                                            event.accepted = true
-                                        }
-                                    }
-                                }
-
-                                Popup {
-                                    id: suggestions
-                                    objectName: "templateSuggestions"
-                                    y: templateEdit.height
-                                    width: Math.min(280, templateEdit.width)
-                                    height: Math.min(220, suggestionList.contentHeight + 12)
-                                    padding: 6
-                                    focus: false
-                                    closePolicy: Popup.CloseOnPressOutside
-
-                                    ListView {
-                                        id: suggestionList
-                                        anchors.fill: parent
-                                        clip: true
-                                        model: templateEdit.completion.options || []
-                                        delegate: ItemDelegate {
-                                            required property int index
-                                            required property string modelData
-                                            width: ListView.view.width
-                                            text: modelData
-                                            highlighted: ListView.isCurrentItem
-                                            onClicked: templateEdit.acceptCompletion(modelData)
-                                        }
-                                    }
-                                }
+                                settings: root.settings
                             }
                         }
 

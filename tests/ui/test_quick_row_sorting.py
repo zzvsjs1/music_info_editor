@@ -181,6 +181,23 @@ def test_mapping_sort_uses_numeric_identity_and_keeps_unmapped_last(row_scene):
     assert table.property("currentId") == "two"
 
 
+def test_explicit_text_sort_uses_one_comparison_type_for_the_entire_column(row_scene):
+    window, table = row_scene()
+    table.setProperty("columns", [{"key": "value", "label": "Value", "sortType": "text"}])
+    table.setProperty("rows", [
+        {"id": "two", "value": 2},
+        {"id": "ten", "value": "10"},
+        {"id": "thirty", "value": 30},
+    ])
+
+    # A declared text column compares all rendered values as text, regardless
+    # of whether a provider projection supplied a number or a numeric string.
+    click_heading(window, table, "Value")
+    assert displayed_ids(table) == ["ten", "two", "thirty"]
+    click_heading(window, table, "Value")
+    assert displayed_ids(table) == ["thirty", "two", "ten"]
+
+
 def test_external_sort_dispatches_without_reordering_provider_rows(row_scene):
     window, table = row_scene(external=True)
     requested = QSignalSpy(table.sortRequested)

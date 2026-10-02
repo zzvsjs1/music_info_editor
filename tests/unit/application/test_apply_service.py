@@ -1046,6 +1046,50 @@ def test_unexpected_report_exception_isolated_from_successful_audio_result() -> 
     )
 
 
+@pytest.mark.parametrize("cancel_before_inspection", (False, True))
+@pytest.mark.parametrize("separate_album", (False, True))
+def test_preflight_cancellation_preserves_later_no_change_files(
+    cancel_before_inspection: bool, separate_album: bool,
+) -> None:
+    token = MutableCancellationToken()
+    adapter = StubAdapter()
+
+    class CancellingPreflight:
+        def inspect(self, source, _changes, _backup):
+            token.cancel()
+            return make_preflight_snapshot(source, adapter)
+
+    class ForbiddenWriter:
+        def apply_file(self, *_args, **_kwargs):
+            raise AssertionError("a cancelled preflight must never enter the writer")
+
+    if cancel_before_inspection:
+        token.cancel()
+
+    changed = make_file_request("changed", "library/a/01.flac")
+    unchanged = make_file_request("unchanged", "library/b/02.flac", new_title="Old unchanged")
+    groups = (
+        (ApplyGroupRequest("first", 1, None, (changed,)), ApplyGroupRequest("second", 1, None, (unchanged,)))
+        if separate_album else (ApplyGroupRequest("first", 1, None, (changed, unchanged)),)
+    )
+    events = RecordingEventSink([])
+    result = ApplyService(preflight=CancellingPreflight(), writer=ForbiddenWriter()).apply(
+        make_batch(groups), cancellation=token, events=events,
+    )
+
+    # Preflight never started a transaction. A later no-op therefore remains a
+    # truthful no-change result regardless of its position or album membership.
+    outcomes = tuple(file for group in result.groups for file in group.files)
+    assert result.status is ApplyBatchStatus.CANCELLED
+    assert outcomes[0].skip_reason is ApplySkipReason.CANCELLED_BEFORE_START
+    assert outcomes[1].status is ApplyFileOutcomeStatus.NO_CHANGES
+    assert not any(file.transaction_result is not None for file in outcomes)
+    assert not any(
+        isinstance(event, OperationStageChanged) and event.stage == ApplyStage.APPLYING_FILES
+        for event in events.events
+    )
+
+
 def test_preflight_cancellation_stops_inspection_without_entering_apply_stage() -> None:
     token = MutableCancellationToken()
     inspected: list[str] = []

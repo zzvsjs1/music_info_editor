@@ -17,6 +17,7 @@ from metadata_polisher.domain.errors import Issue, MatchingErrorCode, ProviderEr
 from metadata_polisher.domain.matching import ReleaseCandidate, ReleaseSearchQuery
 from metadata_polisher.domain.media import LocalMediaFile
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField
+from metadata_polisher.domain.release_identity import ReleaseMediumIdentity as ReleaseMediumIdentity
 from metadata_polisher.execution.cancellation import CancellationToken, NeverCancelledToken
 from metadata_polisher.execution.events import (
     OperationEvent,
@@ -375,6 +376,62 @@ class LookupEnrichmentResult:
         object.__setattr__(self, "failures", failures)
 
 
+class LookupRankingIssue(StrEnum):
+    """Shared lineage failures, independent of a caller's diagnostic wording."""
+
+    DUPLICATE_CANDIDATES = "lookup candidate identities must be unique"
+    FOREIGN_RELEASE = "every ranking entry release must equal its lookup candidate"
+    FOREIGN_MEDIUM = "every ranking entry medium must equal its indexed lookup medium"
+    INCOMPLETE_RANKING = "ranking identities must contain every scoreable lookup medium exactly once"
+
+
+def lookup_ranking_issue(
+    lookup_result: LookupSearchResult,
+    release_ranking: ReleaseRanking,
+) -> LookupRankingIssue | None:
+    """Check the same candidate/medium lineage at lookup and session boundaries.
+
+    Catalogue IDs alone do not establish ownership: ranked releases and media
+    must equal the retained candidate values, and every scoreable medium must
+    appear exactly once. Keep the checks ordered so the first failure is stable.
+    """
+    candidates_by_identity: dict[tuple[str, str, str], ReleaseCandidate] = {}
+
+    for item in lookup_result.candidates:
+        retained_candidate = item.candidate
+        identity = (retained_candidate.engine_id, retained_candidate.source_id, retained_candidate.release_id)
+
+        if identity in candidates_by_identity:
+            return LookupRankingIssue.DUPLICATE_CANDIDATES
+
+        candidates_by_identity[identity] = retained_candidate
+
+    for entry in release_ranking.entries:
+        candidate = candidates_by_identity.get(entry.identity.release_identity)
+
+        if candidate is None or entry.release != candidate:
+            return LookupRankingIssue.FOREIGN_RELEASE
+
+        if entry.medium_index >= len(candidate.media) or entry.medium != candidate.media[entry.medium_index]:
+            return LookupRankingIssue.FOREIGN_MEDIUM
+
+    ranking_identities = release_ranking.identities
+    expected_ranking_identities = {
+        ReleaseMediumIdentity(candidate.engine_id, candidate.source_id, candidate.release_id, medium_index)
+        for candidate in candidates_by_identity.values()
+        if is_valid_basic_media(candidate)
+        for medium_index, _medium in enumerate(candidate.media)
+    }
+
+    if (
+        len(ranking_identities) != len(set(ranking_identities))
+        or set(ranking_identities) != expected_ranking_identities
+    ):
+        return LookupRankingIssue.INCOMPLETE_RANKING
+
+    return None
+
+
 @dataclass(frozen=True)
 class CandidateLookupResult:
     """State-independent hydrated search and deterministic release ranking."""
@@ -406,49 +463,10 @@ class CandidateLookupResult:
             for item in self.lookup_result.candidates
         )
 
-        if len(candidate_identities) != len(set(candidate_identities)):
-            raise ValueError("lookup candidate identities must be unique")
+        ranking_issue = lookup_ranking_issue(self.lookup_result, self.release_ranking)
 
-        candidates_by_identity = {
-            identity: item.candidate
-            for identity, item in zip(
-                candidate_identities,
-                self.lookup_result.candidates,
-                strict=True,
-            )
-        }
-        for entry in self.release_ranking.entries:
-            candidate = candidates_by_identity.get(entry.identity[:3])
-
-            if candidate is None or entry.release != candidate:
-                raise ValueError("every ranking entry release must equal its lookup candidate")
-
-            if (
-                entry.medium_index >= len(candidate.media)
-                or entry.medium != candidate.media[entry.medium_index]
-            ):
-                raise ValueError("every ranking entry medium must equal its indexed lookup medium")
-
-        ranking_identities = self.release_ranking.identities
-        expected_ranking_identities = {
-            (
-                candidate.engine_id,
-                candidate.source_id,
-                candidate.release_id,
-                medium_index,
-            )
-            for candidate in candidates_by_identity.values()
-            if is_valid_basic_media(candidate)
-            for medium_index, _medium in enumerate(candidate.media)
-        }
-
-        if (
-            len(ranking_identities) != len(set(ranking_identities))
-            or set(ranking_identities) != expected_ranking_identities
-        ):
-            raise ValueError(
-                "ranking identities must contain every scoreable lookup medium exactly once"
-            )
+        if ranking_issue is not None:
+            raise ValueError(ranking_issue.value)
 
         notice_identities = tuple(
             notice.candidate_identity for notice in hydration_notices
@@ -490,9 +508,6 @@ class CandidateLookupResult:
         )
 
 
-type ReleaseMediumIdentity = tuple[str, str, str, int]
-
-
 @dataclass(frozen=True)
 class SelectedMetadataResult:
     """State-free result of one explicit selected-release enrichment and mapping."""
@@ -518,6 +533,10 @@ class SelectedMetadataResult:
             or identity[3] < 0
         ):
             raise TypeError("selected_identity must contain three strings and a non-negative index")
+
+        # Public callers may still supply the original four-tuple. Normalise it
+        # only after the existing shape checks, preserving their error boundary.
+        identity = ReleaseMediumIdentity(*identity)
 
         if identity not in self.candidate_lookup.release_ranking.identities:
             raise ValueError("selected_identity must belong to the candidate ranking")
@@ -552,19 +571,19 @@ class SelectedMetadataResult:
 
             if (
                 (candidate.engine_id, candidate.source_id, candidate.release_id)
-                != identity[:3]
+                != identity.release_identity
             ):
                 raise ValueError("selected candidate identity must match selected_identity")
 
-            if identity[3] >= len(candidate.media):
+            if identity.medium_index >= len(candidate.media):
                 raise ValueError("selected medium index is outside the enriched candidate")
 
-            if self.track_mapping.selected_medium_index != identity[3]:
+            if self.track_mapping.selected_medium_index != identity.medium_index:
                 raise ValueError("track mapping must use the selected medium index")
 
             if (
                 self.track_mapping.selected_medium_number
-                != candidate.media[identity[3]].medium_number
+                != candidate.media[identity.medium_index].medium_number
             ):
                 raise ValueError("track mapping must use the selected medium number")
 
@@ -582,6 +601,7 @@ class SelectedMetadataResult:
 
         object.__setattr__(self, "failures", failures)
         object.__setattr__(self, "reviewed_files", reviewed_files)
+        object.__setattr__(self, "selected_identity", identity)
 
 
 @dataclass(frozen=True)
@@ -969,7 +989,7 @@ class LookupService:
         self,
         group: AlbumGroup,
         candidate_lookup: CandidateLookupResult,
-        selected_identity: ReleaseMediumIdentity,
+        selected_identity: tuple[str, str, str, int],
         context: RequestContext,
         *,
         policy: MatchingPolicy = DEFAULT_MATCHING_POLICY,
@@ -1008,6 +1028,10 @@ class LookupService:
         if ranked_entry is None:
             raise ValueError("selected_identity must belong to the candidate ranking")
 
+        # Preserve the supplied components when naming a legacy tuple. In
+        # particular, tuple equality must not turn an invalid bool index into
+        # the ranking's valid integer before the result validates its shape.
+        identity = ReleaseMediumIdentity(*selected_identity)
         selected = next(
             item
             for item in candidate_lookup.lookup_result.candidates
@@ -1016,7 +1040,7 @@ class LookupService:
                 item.candidate.source_id,
                 item.candidate.release_id,
             )
-            == selected_identity[:3]
+            == identity.release_identity
         )
         active_cancellation = cancellation if cancellation is not None else NeverCancelledToken()
         active_events = events if events is not None else _DiscardEventSink()
@@ -1069,7 +1093,7 @@ class LookupService:
 
             return SelectedMetadataResult(
                 candidate_lookup=candidate_lookup,
-                selected_identity=selected_identity,
+                selected_identity=identity,
                 selected_candidate=None,
                 track_mapping=None,
                 reviewed_files=(),
@@ -1077,7 +1101,7 @@ class LookupService:
             )
 
         enriched = enrichment.candidate
-        medium_index = selected_identity[3]
+        medium_index = identity.medium_index
 
         # Enrichment may add credits, but changing the selected track structure
         # would invalidate the earlier score and the meaning of every track index.
@@ -1101,7 +1125,7 @@ class LookupService:
 
             return SelectedMetadataResult(
                 candidate_lookup=candidate_lookup,
-                selected_identity=selected_identity,
+                selected_identity=identity,
                 selected_candidate=None,
                 track_mapping=None,
                 reviewed_files=(),
@@ -1195,7 +1219,7 @@ class LookupService:
 
         return SelectedMetadataResult(
             candidate_lookup=candidate_lookup,
-            selected_identity=selected_identity,
+            selected_identity=identity,
             selected_candidate=enriched,
             track_mapping=mapping,
             reviewed_files=reviewed_files,

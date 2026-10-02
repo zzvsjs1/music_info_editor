@@ -26,10 +26,12 @@ from mutagen.id3 import (
 from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.metadata import (
     FieldReadState,
+    FieldValue,
     MetadataChange,
     MetadataField,
     MetadataSnapshot,
     Position,
+    metadata_value,
 )
 from metadata_polisher.formats.base import TagReadResult, VerificationResult
 from metadata_polisher.formats.id3_policy import changed_frame_ids
@@ -303,11 +305,7 @@ def _replace_text_frame(
         tags.add(frame)  # type: ignore[no-untyped-call]
 
 
-def _metadata_value(snapshot: MetadataSnapshot, field: MetadataField) -> object:
-    return getattr(snapshot, field.value)
-
-
-def _expected_field_state(value: object) -> FieldReadState:
+def _expected_field_state(value: FieldValue | None) -> FieldReadState:
     if value is None or value == () or value == Position():
         return FieldReadState.MISSING
 
@@ -486,8 +484,8 @@ class Id3TagCodec:
         # Stable field order makes multiple verification failures reproducible.
         # Value equality alone is insufficient when decoding reported UNREADABLE.
         for field in sorted(changed_fields, key=lambda item: item.value):
-            expected_value = _metadata_value(expected, field)
-            actual_value = _metadata_value(actual.metadata, field)
+            expected_value = metadata_value(expected, field)
+            actual_value = metadata_value(actual.metadata, field)
             expected_state = _expected_field_state(expected_value)
             actual_state = actual.field_states[field]
 

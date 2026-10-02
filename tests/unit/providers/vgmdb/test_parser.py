@@ -168,3 +168,34 @@ def test_two_part_duration_allows_more_than_sixty_minutes() -> None:
     )
 
     assert candidate.media[0].tracks[0].duration_seconds == 4_500.0
+
+
+def test_language_merge_keeps_row_identity_separate_and_only_fills_missing_duration() -> None:
+    html = """
+    <h1><span class="albumtitle" lang="en">Parallel tracks</span></h1>
+    <div id="tracklist">
+      <span lang="en"><table class="role">
+        <tr><td></td><td>Opening</td><td class="time"></td></tr>
+        <tr><td>1</td><td>Theme</td><td class="time">3:01</td></tr>
+      </table></span>
+      <span lang="ja"><table class="role">
+        <tr><td></td><td>始まり</td><td class="time">0:30</td></tr>
+        <tr><td>1</td><td>主題</td><td class="time">2:00</td></tr>
+      </table></span>
+    </div>
+    """
+    candidate = parse_album_detail(html, source_url="https://vgmdb.net/album/4300")
+
+    assert len(candidate.media) == 1
+    medium = candidate.media[0]
+
+    # An unknown first row and source track one occupy separate identities.
+    # Later languages fill absent duration evidence without replacing the first
+    # known duration or changing the first view's track and title order.
+    assert [track.track_number for track in medium.tracks] == [None, 1]
+    assert [[title.value for title in track.titles] for track in medium.tracks] == [
+        ["Opening", "始まり"],
+        ["Theme", "主題"],
+    ]
+    assert [track.duration_seconds for track in medium.tracks] == [30.0, 181.0]
+    assert medium.tracks_complete is False

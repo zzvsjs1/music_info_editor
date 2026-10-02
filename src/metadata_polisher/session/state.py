@@ -11,8 +11,10 @@ from metadata_polisher.application.changes import FileChangeSet, RenameDecision,
 from metadata_polisher.application.lookup import (
     CandidateLookupResult,
     GroupLookupResult,
+    LookupRankingIssue,
     LookupSearchResult,
     SelectedMetadataResult,
+    lookup_ranking_issue,
 )
 from metadata_polisher.application.scanning import ScanLibraryResult
 from metadata_polisher.domain.errors import Issue
@@ -23,6 +25,7 @@ from metadata_polisher.domain.metadata import (
     MetadataField,
     metadata_value,
 )
+from metadata_polisher.domain.release_identity import ReleaseMediumIdentity as ReleaseMediumIdentity
 from metadata_polisher.domain.review import (
     FieldProposal,
     FieldReviewState,
@@ -32,12 +35,11 @@ from metadata_polisher.infrastructure.settings import RenameSettings
 from metadata_polisher.matching.release_scoring import ReleaseRanking
 from metadata_polisher.matching.track_mapping import TrackMappingResult
 from metadata_polisher.providers.cache import MemoryCache
-from metadata_polisher.providers.coordinator import CoordinatedCandidate, is_valid_basic_media
+from metadata_polisher.providers.coordinator import CoordinatedCandidate
 from metadata_polisher.scanner.grouping import AlbumGroup, GroupingWarning, derive_album_title
 
 type ProviderCacheKey = tuple[str, ...]
 type ProviderCacheValue = ReleaseCandidate | tuple[ReleaseCandidate, ...]
-type ReleaseMediumIdentity = tuple[str, str, str, int]
 
 _DEFAULT_RENAME_SETTINGS = RenameSettings()
 
@@ -181,11 +183,11 @@ class ReleaseSelectionState:
         """Return the stable catalogue and medium identity used by ranking."""
         release = self.candidate.candidate
 
-        return (
-            release.engine_id,
-            release.source_id,
-            release.release_id,
-            self.medium_index,
+        return ReleaseMediumIdentity(
+            engine_id=release.engine_id,
+            source_id=release.source_id,
+            release_id=release.release_id,
+            medium_index=self.medium_index,
         )
 
     @property
@@ -358,6 +360,31 @@ class GroupState:
             self.reviewed_files,
             ReviewedFileState,
         )
+        # Each phase validates one dependency boundary. Their order preserves
+        # the original first-error behaviour before normalised values are stored.
+        reviewed_files = self._validated_review_ownership(warnings, reviewed_files)
+        self._validate_lookup_lineage()
+        self._validate_selected_release()
+        self._validate_track_mappings()
+        self._validate_selected_metadata(reviewed_files)
+        self._validate_lookup_failures()
+
+        has_provider_proposals = any(reviewed.proposals for reviewed in reviewed_files)
+
+        if has_provider_proposals and self.selected_release is None:
+            raise ValueError("provider proposals require a selected release")
+
+        self._validate_preferences()
+        self._validate_rescan_boundary(reviewed_files)
+
+        object.__setattr__(self, "warnings", warnings)
+        object.__setattr__(self, "reviewed_files", reviewed_files)
+
+    def _validated_review_ownership(
+        self,
+        warnings: tuple[GroupingWarning, ...],
+        reviewed_files: tuple[ReviewedFileState, ...],
+    ) -> tuple[ReviewedFileState, ...]:
         # Validate ownership before accepting any derived data. Matching file
         # IDs alone are insufficient if the review's source values have changed.
         group_file_by_id = {file.file_id: file for file in self.group.files}
@@ -399,6 +426,9 @@ class GroupState:
                 if file.file_id in reviewed_by_id
             )
 
+        return reviewed_files
+
+    def _validate_lookup_lineage(self) -> None:
         if self.lookup_result is not None:
             if not isinstance(self.lookup_result, LookupSearchResult):
                 raise TypeError("lookup_result must be a LookupSearchResult or None")
@@ -425,62 +455,20 @@ class GroupState:
             if self.lookup_result is None:
                 raise ValueError("release ranking requires a lookup result")
 
-            candidate_identity_sequence = tuple(
-                (
-                    item.candidate.engine_id,
-                    item.candidate.source_id,
-                    item.candidate.release_id,
-                )
-                for item in self.lookup_result.candidates
-            )
+            ranking_issue = lookup_ranking_issue(self.lookup_result, self.release_ranking)
 
-            if len(candidate_identity_sequence) != len(set(candidate_identity_sequence)):
-                raise ValueError("lookup candidate identities must be unique")
+            if ranking_issue is not None:
+                messages = {
+                    LookupRankingIssue.DUPLICATE_CANDIDATES: "lookup candidate identities must be unique",
+                    LookupRankingIssue.FOREIGN_RELEASE: "release ranking entries must equal their lookup candidates",
+                    LookupRankingIssue.FOREIGN_MEDIUM: "release ranking media must equal their indexed lookup media",
+                    LookupRankingIssue.INCOMPLETE_RANKING: (
+                        "release ranking must contain every scoreable lookup medium exactly once"
+                    ),
+                }
+                raise ValueError(messages[ranking_issue])
 
-            candidates_by_identity = {
-                identity: item.candidate
-                for identity, item in zip(
-                    candidate_identity_sequence,
-                    self.lookup_result.candidates,
-                    strict=True,
-                )
-            }
-            ranking_identities = tuple(entry.identity for entry in self.release_ranking.entries)
-
-            # Each ranked medium must come from the exact retained candidate,
-            # not just reuse its catalogue ID with different tracks or positions.
-            for entry in self.release_ranking.entries:
-                candidate = candidates_by_identity.get(entry.identity[:3])
-
-                if candidate is None or entry.release != candidate:
-                    raise ValueError("release ranking entries must equal their lookup candidates")
-
-                if (
-                    entry.medium_index >= len(candidate.media)
-                    or entry.medium != candidate.media[entry.medium_index]
-                ):
-                    raise ValueError("release ranking media must equal their indexed lookup media")
-
-            expected_ranking_identities = {
-                (
-                    candidate.engine_id,
-                    candidate.source_id,
-                    candidate.release_id,
-                    medium_index,
-                )
-                for candidate in candidates_by_identity.values()
-                if is_valid_basic_media(candidate)
-                for medium_index, _medium in enumerate(candidate.media)
-            }
-
-            if (
-                len(ranking_identities) != len(set(ranking_identities))
-                or set(ranking_identities) != expected_ranking_identities
-            ):
-                raise ValueError(
-                    "release ranking must contain every scoreable lookup medium exactly once"
-                )
-
+    def _validate_selected_release(self) -> None:
         if self.selected_release is not None:
             if not isinstance(self.selected_release, ReleaseSelectionState):
                 raise TypeError("selected_release must be a ReleaseSelectionState or None")
@@ -491,7 +479,7 @@ class GroupState:
             if self.selected_release.identity not in self.release_ranking.identities:
                 raise ValueError("selected release must belong to the release ranking")
 
-            selected_identity = self.selected_release.identity[:3]
+            selected_identity = self.selected_release.identity.release_identity
             lookup_result = self.lookup_result
 
             if lookup_result is None:
@@ -517,6 +505,7 @@ class GroupState:
             ):
                 raise ValueError("selected release must retain its lookup provenance")
 
+    def _validate_track_mappings(self) -> None:
         if self.automatic_track_mapping is not None:
             if not isinstance(self.automatic_track_mapping, TrackMappingResult):
                 raise TypeError("automatic_track_mapping must be a TrackMappingResult or None")
@@ -538,6 +527,7 @@ class GroupState:
 
             self._validate_mapping(self.manual_track_mapping, self.selected_release)
 
+    def _validate_selected_metadata(self, reviewed_files: tuple[ReviewedFileState, ...]) -> None:
         if self.selected_metadata is not None:
             if not isinstance(self.selected_metadata, SelectedMetadataResult):
                 raise TypeError("selected_metadata must be a SelectedMetadataResult or None")
@@ -552,7 +542,7 @@ class GroupState:
 
             expected_selection = ReleaseSelectionState(
                 candidate=selected.selected_candidate,
-                medium_index=selected.selected_identity[3],
+                medium_index=selected.selected_identity.medium_index,
             )
             expected_reviewed_files = tuple(
                 ReviewedFileState(
@@ -574,6 +564,7 @@ class GroupState:
             if reviewed_files != expected_reviewed_files:
                 raise ValueError("reviewed files must exactly project selected_metadata")
 
+    def _validate_lookup_failures(self) -> None:
         if self.selection_failure is not None:
             if not isinstance(self.selection_failure, SelectedMetadataResult):
                 raise TypeError("selection_failure must be a SelectedMetadataResult or None")
@@ -600,11 +591,7 @@ class GroupState:
             ):
                 raise ValueError("search_failure must contain an unsuccessful search")
 
-        has_provider_proposals = any(reviewed.proposals for reviewed in reviewed_files)
-
-        if has_provider_proposals and self.selected_release is None:
-            raise ValueError("provider proposals require a selected release")
-
+    def _validate_preferences(self) -> None:
         _validate_optional_non_blank("language_override", self.language_override)
 
         if self.disc_number_override is not None:
@@ -625,6 +612,7 @@ class GroupState:
 
         _validate_revision("revision", self.revision)
 
+    def _validate_rescan_boundary(self, reviewed_files: tuple[ReviewedFileState, ...]) -> None:
         if self.requires_rescan and any(
             value
             for value in (
@@ -641,9 +629,6 @@ class GroupState:
             )
         ):
             raise ValueError("a group requiring rescan cannot retain derived state")
-
-        object.__setattr__(self, "warnings", warnings)
-        object.__setattr__(self, "reviewed_files", reviewed_files)
 
     @property
     def effective_track_mapping(self) -> TrackMappingResult | None:
@@ -1646,7 +1631,7 @@ def _group_state_from_lookup_result(
         candidate_lookup=result.candidate_lookup,
         selected_release=ReleaseSelectionState(
             candidate=selected.selected_candidate,
-            medium_index=selected.selected_identity[3],
+            medium_index=selected.selected_identity.medium_index,
         ),
         automatic_track_mapping=selected.track_mapping,
         manual_track_mapping=None,

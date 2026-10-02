@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
+from typing import Literal
 from urllib.parse import urljoin, urlsplit
 
 from metadata_polisher.domain.matching import (
@@ -102,11 +103,14 @@ class _MergedTrack:
     printed_number: str | None
 
 
+type _PositionKey = tuple[Literal["number", "row"], int]
+
+
 @dataclass
 class _MergedMedium:
     number: int | None
     title: str | None
-    tracks: dict[tuple[str, int], _MergedTrack]
+    tracks: dict[_PositionKey, _MergedTrack]
 
 
 def _document(html: str) -> _Node:
@@ -549,6 +553,68 @@ def _tracklist_languages(document: _Node) -> tuple[tuple[str | None, str | None]
     return tuple(_language(_text(item)) for item in _find_all(navigation[0], tag="li"))
 
 
+def _position_key(number: int | None, row: int) -> _PositionKey:
+    # Row order aligns unnumbered language variants without inventing a source
+    # number. Separate key spaces keep an unknown first row distinct from one.
+    return ("number", number) if number is not None else ("row", row)
+
+
+def _merge_track_variant(
+    tracks: dict[_PositionKey, _MergedTrack],
+    track: _TrackVariant,
+    row: int,
+    language: str | None,
+    script: str | None,
+) -> None:
+    """Add one language variant while retaining the first known track facts."""
+    track_key = _position_key(track.number, row)
+    merged_track = tracks.get(track_key)
+
+    if merged_track is None:
+        merged_track = _MergedTrack(
+            number=track.number,
+            titles=[],
+            duration_seconds=track.duration_seconds,
+            printed_number=track.printed_number,
+        )
+        tracks[track_key] = merged_track
+
+    if merged_track.duration_seconds is None and track.duration_seconds is not None:
+        merged_track.duration_seconds = track.duration_seconds
+
+    if track.title is None:
+        return
+
+    title = LocalisedText(value=track.title, language=language, script=script)
+
+    if title not in merged_track.titles:
+        merged_track.titles.append(title)
+
+
+def _release_medium(medium: _MergedMedium) -> ReleaseMedium:
+    """Freeze accumulated language evidence without inferring track credits."""
+    tracks = tuple(
+        ProviderTrack(
+            track_number=track.number,
+            titles=tuple(track.titles),
+            artists=(),
+            # Album credits have no per-track assignment, even for one composer.
+            composers=(),
+            duration_seconds=track.duration_seconds,
+            printed_number=track.printed_number,
+        )
+        for track in medium.tracks.values()
+    )
+
+    return ReleaseMedium(
+        medium_number=medium.number,
+        title=medium.title,
+        tracks=tracks,
+        # Visible rows are evidence, not an independently established total.
+        tracks_complete=False,
+    )
+
+
 def _merged_media(document: _Node) -> tuple[ReleaseMedium, ...]:
     tracklists = _find_all(document, element_id="tracklist")
 
@@ -568,7 +634,7 @@ def _merged_media(document: _Node) -> tuple[ReleaseMedium, ...]:
     languages = _tracklist_languages(document)
     # Parallel language views describe the same media, not extra discs. Merge
     # them by source position where known, preserving first-seen display order.
-    merged: dict[tuple[str, int], _MergedMedium] = {}
+    merged: dict[_PositionKey, _MergedMedium] = {}
 
     for view_index, view in enumerate(views):
         if view_index < len(languages):
@@ -577,7 +643,7 @@ def _merged_media(document: _Node) -> tuple[ReleaseMedium, ...]:
             language, script = _language(view.attributes.get("lang"))
 
         for medium_index, medium in enumerate(_view_media(view), start=1):
-            medium_key = ("number", medium.number) if medium.number is not None else ("row", medium_index)
+            medium_key = _position_key(medium.number, medium_index)
             merged_medium = merged.get(medium_key)
 
             if merged_medium is None:
@@ -589,53 +655,9 @@ def _merged_media(document: _Node) -> tuple[ReleaseMedium, ...]:
                 merged[medium_key] = merged_medium
 
             for track_index, track in enumerate(medium.tracks, start=1):
-                # A row index aligns unnumbered language variants, but is not a
-                # source track number. Separate key spaces prevent an unknown
-                # first row from swallowing an explicitly numbered track one.
-                track_key = ("number", track.number) if track.number is not None else ("row", track_index)
-                merged_track = merged_medium.tracks.get(track_key)
+                _merge_track_variant(merged_medium.tracks, track, track_index, language, script)
 
-                if merged_track is None:
-                    merged_track = _MergedTrack(
-                        number=track.number,
-                        titles=[],
-                        duration_seconds=track.duration_seconds,
-                        printed_number=track.printed_number,
-                    )
-                    merged_medium.tracks[track_key] = merged_track
-
-                if merged_track.duration_seconds is None and track.duration_seconds is not None:
-                    merged_track.duration_seconds = track.duration_seconds
-
-                if track.title is not None:
-                    title = LocalisedText(value=track.title, language=language, script=script)
-
-                    if title not in merged_track.titles:
-                        merged_track.titles.append(title)
-
-    return tuple(
-        ReleaseMedium(
-            medium_number=medium.number,
-            title=medium.title,
-            tracks=tuple(
-                ProviderTrack(
-                    track_number=track.number,
-                    titles=tuple(track.titles),
-                    artists=(),
-                    # The album credits table supplies no per-track assignment.
-                    # Even one album composer cannot establish exact track credit.
-                    composers=(),
-                    duration_seconds=track.duration_seconds,
-                    printed_number=track.printed_number,
-                )
-                for track in medium.tracks.values()
-            ),
-            # The current HTML parser has no independently established total
-            # count/completeness contract. Visible rows remain useful evidence.
-            tracks_complete=False,
-        )
-        for medium in merged.values()
-    )
+    return tuple(_release_medium(medium) for medium in merged.values())
 
 
 def parse_album_detail(html: str, *, source_url: str) -> ReleaseCandidate:

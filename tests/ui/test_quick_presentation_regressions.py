@@ -145,9 +145,14 @@ def test_main_minimum_size_retains_usable_table_and_separate_footer(presentation
         assert position.y() + button.height() <= workspace.height() + 1, name
         _inside(window, button)
 
-    for name in ("settingsButton", "diagnosticsButton", "operationStageButton", "cancelButton",
+    # Compact windows move secondary commands into menus. Hidden controls keep
+    # their last geometry, which is not part of the currently visible layout.
+    for name in ("groupToolsButton", "compactFileActionsButton", "operationStageButton", "cancelButton",
                  "applyResultsButton", "applySelectedButton"):
-        _inside(window, _item(window, name))
+        control = _item(window, name)
+
+        if control.isVisible():
+            _inside(window, control)
 
     progress = _item(window, "operationStageButton")
     assert progress.mapToScene(QPointF()).y() >= workspace.mapToScene(QPointF(0, workspace.height())).y()

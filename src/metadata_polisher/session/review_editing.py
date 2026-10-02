@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from enum import StrEnum
 
 from metadata_polisher.application.changes import RenameDecision
@@ -675,6 +676,147 @@ def _position_scope_blocked(
     return len(disc_numbers) > 1 or len(selected_media) + len(local_groups) > 1
 
 
+@dataclass
+class _BatchReviewEdits:
+    """Collect a draft batch before publishing one state change and Undo entry."""
+
+    reviews: dict[str, ReviewedFileState]
+    rename_decisions: dict[str, RenameDecision]
+    affected: list[BatchReviewOutcome] = dataclass_field(default_factory=list)
+    skipped: list[BatchReviewOutcome] = dataclass_field(default_factory=list)
+    blocked: list[BatchReviewOutcome] = dataclass_field(default_factory=list)
+    changed_groups: set[str] = dataclass_field(default_factory=set)
+
+    def record_change(self, located: ReviewFileSource, field: MetadataField | None) -> None:
+        self.affected.append(BatchReviewOutcome(
+            located.source.file_id, field, "Review decision updated; no files written.",
+        ))
+        self.changed_groups.add(located.group.group.group_id)
+
+
+def _collect_batch_rename_edits(
+    command: BatchReviewCommand,
+    selected: tuple[ReviewFileSource, ...],
+    rename_settings: RenameSettings,
+    edits: _BatchReviewEdits,
+) -> None:
+    """Change each file's rename intent without introducing a metadata field."""
+    decision = (
+        RenameDecision.APPLY_RENAME
+        if command.action is BatchReviewAction.INCLUDE_RENAMES
+        else RenameDecision.KEEP_FILENAME
+    )
+
+    for located in selected:
+        file_id = located.source.file_id
+
+        if located.group.requires_rescan:
+            edits.blocked.append(BatchReviewOutcome(file_id, None, "Rescan this file before changing its review."))
+            continue
+
+        if command.action is BatchReviewAction.INCLUDE_RENAMES and not rename_settings.enabled:
+            edits.blocked.append(BatchReviewOutcome(file_id, None, "Enable filename renaming in Settings first."))
+            continue
+
+        if edits.rename_decisions[file_id] is decision:
+            edits.skipped.append(BatchReviewOutcome(file_id, None, "Filename intent is already selected."))
+            continue
+
+        edits.rename_decisions[file_id] = decision
+        edits.record_change(located, None)
+
+
+def _batch_field_scope_reason(
+    located: ReviewFileSource,
+    field: MetadataField,
+    command: BatchReviewCommand,
+    selected: tuple[ReviewFileSource, ...],
+    *,
+    cross_group: bool,
+) -> str | None:
+    """Check scope before inspecting field evidence, retaining blocker priority."""
+    if located.group.requires_rescan:
+        return "Rescan this file before changing its review."
+
+    if _position_scope_blocked(command, field, selected):
+        return "Track and disc positions require their own track/medium scope; use each file's candidate."
+
+    if (
+        field in _ALBUM_FIELDS and cross_group and not command.confirm_cross_group
+        and command.action in {
+            BatchReviewAction.SET_COMMON_VALUE, BatchReviewAction.CLEAR, BatchReviewAction.USE_CANDIDATE,
+        }
+    ):
+        return "Confirm the album-level edit across different groups or releases."
+
+    return None
+
+
+def _batch_field_evidence_reason(
+    reviewed: ReviewedFileState,
+    current: FieldReviewState,
+    command: BatchReviewCommand,
+) -> str | None:
+    """Keep unreadable fields and unresolved track identities out of edits."""
+    if current.read_state in {FieldReadState.UNREADABLE, FieldReadState.UNSUPPORTED} and (
+        command.action is not BatchReviewAction.KEEP_EXISTING
+    ):
+        return "This field cannot safely be edited."
+
+    if (
+        current.field in _TRACK_FIELDS and not reviewed.track_mapping_resolved
+        and command.action in {BatchReviewAction.USE_CANDIDATE, BatchReviewAction.ACCEPT_SAFE_ADDITIONS}
+        and current.proposals
+    ):
+        return "Resolve this file's track mapping first."
+
+    return None
+
+
+def _collect_batch_field_edits(
+    command: BatchReviewCommand,
+    selected: tuple[ReviewFileSource, ...],
+    edits: _BatchReviewEdits,
+) -> None:
+    """Resolve concrete file/field members in the captured command order."""
+    cross_group = len({located.group.group.group_id for located in selected}) > 1
+
+    for located in selected:
+        file_id = located.source.file_id
+
+        for field in command.fields:
+            reason = _batch_field_scope_reason(located, field, command, selected, cross_group=cross_group)
+
+            if reason is not None:
+                edits.blocked.append(BatchReviewOutcome(file_id, field, reason))
+                continue
+
+            reviewed = edits.reviews[file_id]
+            current = next(review for review in reviewed.reviews if review.field is field)
+            reason = _batch_field_evidence_reason(reviewed, current, command)
+
+            if reason is not None:
+                edits.blocked.append(BatchReviewOutcome(file_id, field, reason))
+                continue
+
+            try:
+                replacement = _batch_field_decision(current, command)
+            except (TypeError, ValueError) as error:
+                edits.blocked.append(BatchReviewOutcome(file_id, field, str(error)))
+                continue
+
+            if replacement is None or replacement == current:
+                edits.skipped.append(BatchReviewOutcome(file_id, field, "No eligible candidate or new decision."))
+                continue
+
+            edits.reviews[file_id] = replace(
+                reviewed,
+                change_set=None,
+                reviews=tuple(replacement if item.field is field else item for item in reviewed.reviews),
+            )
+            edits.record_change(located, field)
+
+
 def apply_batch_review(
     state: SessionState, command: BatchReviewCommand, rename_settings: RenameSettings,
 ) -> BatchReviewResult:
@@ -699,107 +841,39 @@ def apply_batch_review(
         raise ValueError("A selected file no longer belongs to this library.")
 
     selected = tuple(indexed[file_id] for file_id in command.file_ids)
-    cross_group = len({located.group.group.group_id for located in selected}) > 1
-    # Record each file/field outcome separately. A blocked composer choice need
-    # not hide a valid album edit, and these are review changes, not disk writes.
-    affected: list[BatchReviewOutcome] = []
-    skipped: list[BatchReviewOutcome] = []
-    blocked: list[BatchReviewOutcome] = []
     reviews = complete_reviewed_files_by_id(state)
-    rename_decisions = {file_id: rename_intent(review) for file_id, review in reviews.items()}
-    changed_groups: set[str] = set()
+    edits = _BatchReviewEdits(
+        reviews=reviews,
+        rename_decisions={file_id: rename_intent(review) for file_id, review in reviews.items()},
+    )
 
-    for file_id in command.file_ids:
-        group = indexed[file_id].group
-        fields: tuple[MetadataField | None, ...] = (None,) if command.action in _RENAME_ACTIONS else command.fields
+    # Filename intent and metadata decisions have distinct member types. Both
+    # paths collect outcomes first, then publish one review-only batch below.
+    if command.action in _RENAME_ACTIONS:
+        _collect_batch_rename_edits(command, selected, rename_settings, edits)
+    else:
+        _collect_batch_field_edits(command, selected, edits)
 
-        for field in fields:
-            reason = ""
-
-            if group.requires_rescan:
-                reason = "Rescan this file before changing its review."
-            elif field is None and command.action is BatchReviewAction.INCLUDE_RENAMES and not rename_settings.enabled:
-                reason = "Enable filename renaming in Settings first."
-            elif field is not None and _position_scope_blocked(command, field, selected):
-                reason = "Track and disc positions require their own track/medium scope; use each file's candidate."
-            elif (
-                field in _ALBUM_FIELDS and cross_group and not command.confirm_cross_group
-                and command.action in {
-                    BatchReviewAction.SET_COMMON_VALUE, BatchReviewAction.CLEAR, BatchReviewAction.USE_CANDIDATE,
-                }
-            ):
-                reason = "Confirm the album-level edit across different groups or releases."
-
-            if reason:
-                blocked.append(BatchReviewOutcome(file_id, field, reason))
-                continue
-
-            if field is None:
-                decision = (
-                    RenameDecision.APPLY_RENAME if command.action is BatchReviewAction.INCLUDE_RENAMES
-                    else RenameDecision.KEEP_FILENAME
-                )
-
-                if rename_decisions[file_id] is decision:
-                    skipped.append(BatchReviewOutcome(file_id, None, "Filename intent is already selected."))
-                    continue
-
-                rename_decisions[file_id] = decision
-            else:
-                current = next(review for review in reviews[file_id].reviews if review.field is field)
-
-                if current.read_state in {FieldReadState.UNREADABLE, FieldReadState.UNSUPPORTED} and (
-                    command.action is not BatchReviewAction.KEEP_EXISTING
-                ):
-                    blocked.append(BatchReviewOutcome(file_id, field, "This field cannot safely be edited."))
-                    continue
-
-                if (
-                    field in _TRACK_FIELDS and not reviews[file_id].track_mapping_resolved
-                    and command.action in {BatchReviewAction.USE_CANDIDATE, BatchReviewAction.ACCEPT_SAFE_ADDITIONS}
-                    and current.proposals
-                ):
-                    blocked.append(BatchReviewOutcome(file_id, field, "Resolve this file's track mapping first."))
-                    continue
-
-                try:
-                    replacement = _batch_field_decision(current, command)
-                except (TypeError, ValueError) as error:
-                    blocked.append(BatchReviewOutcome(file_id, field, str(error)))
-                    continue
-
-                if replacement is None or replacement == current:
-                    skipped.append(BatchReviewOutcome(file_id, field, "No eligible candidate or new decision."))
-                    continue
-
-                reviews[file_id] = replace(
-                    reviews[file_id], change_set=None,
-                    reviews=tuple(replacement if item.field is field else item for item in reviews[file_id].reviews),
-                )
-
-            affected.append(BatchReviewOutcome(file_id, field, "Review decision updated; no files written."))
-            changed_groups.add(group.group.group_id)
-
-    if not affected:
-        return BatchReviewResult(state=state, skipped=tuple(skipped), blocked=tuple(blocked))
+    if not edits.affected:
+        return BatchReviewResult(state=state, skipped=tuple(edits.skipped), blocked=tuple(edits.blocked))
 
     groups: list[GroupState] = []
 
     for group in state.groups:
-        if group.group.group_id in changed_groups:
-            reviewed_files = tuple(reviews[source.file_id] for source in group.group.files)
+        if group.group.group_id in edits.changed_groups:
+            reviewed_files = tuple(edits.reviews[source.file_id] for source in group.group.files)
             group = replace(group, selected_metadata=None, reviewed_files=reviewed_files)
 
         groups.append(group)
 
     staged = replace(state, groups=tuple(groups))
     staged = rebuild_changed_review_groups(
-        staged, changed_groups, rename_settings, rename_decisions=rename_decisions,
+        staged, edits.changed_groups, rename_settings, rename_decisions=edits.rename_decisions,
     )
     groups = []
 
     for group in staged.groups:
-        if group.group.group_id in changed_groups:
+        if group.group.group_id in edits.changed_groups:
             group = replace(group, revision=group.revision + 1)
 
         groups.append(group)
@@ -807,7 +881,12 @@ def apply_batch_review(
     staged = replace(staged, revision=state.revision + 1, groups=tuple(groups))
     updated = record_review_action(state, staged)
 
-    return BatchReviewResult(state=updated, affected=tuple(affected), skipped=tuple(skipped), blocked=tuple(blocked))
+    return BatchReviewResult(
+        state=updated,
+        affected=tuple(edits.affected),
+        skipped=tuple(edits.skipped),
+        blocked=tuple(edits.blocked),
+    )
 
 
 def apply_rename_choices(

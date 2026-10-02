@@ -1,5 +1,6 @@
 """Pure session lookup controls over retained provider evidence and decisions."""
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from metadata_polisher.application.lookup import build_release_search_query
@@ -7,8 +8,13 @@ from metadata_polisher.application.review import build_local_review_texts, reran
 from metadata_polisher.domain.matching import ReleaseSearchQuery
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField
 from metadata_polisher.infrastructure.settings import RenameSettings
-from metadata_polisher.session.review_editing import local_reviews_after_lookup_reset, rebuild_reviewed_files
-from metadata_polisher.session.state import GroupState, ReviewedFileState, SessionState
+from metadata_polisher.session.review_editing import (
+    local_reviews_after_lookup_reset,
+    rebuild_reviewed_files,
+    regrouped_review_undo,
+)
+from metadata_polisher.session.review_previews import rename_intent
+from metadata_polisher.session.state import GroupState, ReviewedFileState, ReviewUndoEntry, ReviewUndoFile, SessionState
 
 _DEFAULT_RENAME_SETTINGS = RenameSettings()
 
@@ -79,6 +85,54 @@ def refresh_inherited_language(
     return state
 
 
+def _reranked_review_undo(
+    state: SessionState,
+    group: GroupState,
+    rename_settings: RenameSettings,
+    rerank: Callable[[ReviewedFileState], ReviewedFileState],
+) -> tuple[ReviewUndoEntry, ...]:
+    """Project both sides of each retained action onto the selected language."""
+    sources = {source.file_id: source for source in group.group.files}
+    history: list[ReviewUndoEntry] = []
+
+    for entry in state.review_undo:
+        retained: list[ReviewUndoFile] = []
+
+        for item in entry.files:
+            source = sources.get(item.source.file_id)
+
+            if source is None:
+                retained.append(item)
+                continue
+
+            # Reranking only changes presentation of this exact source's loaded
+            # evidence. It cannot rehabilitate a written/replaced source or a
+            # group whose filesystem state already requires a fresh scan.
+            if group.requires_rescan or source != item.source:
+                continue
+
+            projected = []
+
+            for previous in (item.before, item.after):
+                # Use the live-field transform on both sides, so sequential
+                # actions remain a chain. Merely relaxing Undo's equality check
+                # would instead restore old proposal ordering and reason codes.
+                # Rebuild each side separately: two snapshots of one file are
+                # different moments, never a two-file rename destination set.
+                rebuilt = rebuild_reviewed_files(
+                    state, group, (rerank(previous),), rename_settings,
+                    rename_decisions={source.file_id: rename_intent(previous)},
+                )
+                projected.append(rebuilt[0])
+
+            retained.append(ReviewUndoFile(source, projected[0], projected[1]))
+
+        if retained:
+            history.append(ReviewUndoEntry(tuple(retained)))
+
+    return tuple(history)
+
+
 def _rerank_language(
     state: SessionState,
     current: GroupState,
@@ -94,12 +148,10 @@ def _rerank_language(
         for field in (MetadataField.TITLE, MetadataField.ARTISTS, MetadataField.ALBUM, MetadataField.ALBUM_ARTISTS)
         for text in local_texts.get(field, ())
     )
-    reviewed_files: list[ReviewedFileState] = []
 
-    for reviewed in current.reviewed_files:
+    def rerank_review(reviewed: ReviewedFileState) -> ReviewedFileState:
         if not reviewed.reviews:
-            reviewed_files.append(reviewed)
-            continue
+            return reviewed
 
         reviews = tuple(
             rerank_field_review_state(
@@ -112,8 +164,9 @@ def _rerank_language(
         )
         # A different default value can change a filename or create a collision;
         # discard the old derived plan and rebuild it from the new decisions.
-        reviewed_files.append(replace(reviewed, reviews=reviews, change_set=None))
+        return replace(reviewed, reviews=reviews, change_set=None)
 
+    reviewed_files = tuple(rerank_review(reviewed) for reviewed in current.reviewed_files)
     rename_decisions = {
         reviewed.file_id: reviewed.change_set.rename_decision
         for reviewed in current.reviewed_files
@@ -141,7 +194,12 @@ def _rerank_language(
         revision=current.revision + 1,
     )
 
-    return _replace_group(state, current, replacement)
+    staged = _replace_group(state, current, replacement)
+
+    return replace(
+        staged,
+        review_undo=_reranked_review_undo(staged, replacement, rename_settings, rerank_review),
+    )
 
 
 def set_search_query_override(
@@ -182,7 +240,13 @@ def set_search_query_override(
         revision=current.revision + 1,
     )
 
-    return _replace_group(state, current, replacement)
+    staged = _replace_group(state, current, replacement)
+    affected_file_ids = frozenset(source.file_id for source in current.group.files)
+
+    # Search terms retire the old release and mapping just like regrouping or a
+    # changed disc hint. Reuse their local-only history projection: independent
+    # choices stay undoable, while candidate approvals cannot return through Undo.
+    return replace(staged, review_undo=regrouped_review_undo(staged, affected_file_ids, rename_settings))
 
 
 def is_group_searchable(group: GroupState) -> bool:

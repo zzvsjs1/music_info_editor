@@ -93,6 +93,37 @@ def test_preferences_are_staged_and_cancel_discards_edits(settings):
     assert facade.draft["template"] == original.rename.template
 
 
+@pytest.mark.parametrize(("name", "value"), [
+    ("trackDigits", True),
+    ("proxyPort", "8080"),
+    ("backupEnabled", 1),
+    ("template", None),
+    ("providerId", 1),
+    ("unknownField", "ignored"),
+])
+def test_settings_boundary_rejects_values_with_the_wrong_declared_type(settings, name, value):
+    host, facade = settings
+    assert facade.open()
+    original = facade.draft
+    facade.setField(name, value)
+
+    assert facade.draft == original
+    assert not host.settings_file.exists()
+
+
+def test_qml_settings_map_is_detached_and_nullable_provider_edits_remain_valid(settings):
+    _host, facade = settings
+    assert facade.open()
+    exported = facade.draft
+    exported["template"] = "Do not publish this map mutation"
+    assert facade.draft["template"] != exported["template"]
+
+    facade.setField("providerId", None)
+    assert facade.draft["providerId"] is None
+    facade.setField("providerId", "vgmdb")
+    assert facade.draft["providerId"] == "vgmdb"
+
+
 @pytest.mark.parametrize(("key", "value", "message"), [
     ("template", "%unknown%", "Unknown"),
     ("preferredLanguage", " ", "preferred language"),
@@ -380,6 +411,42 @@ def test_escape_dismisses_template_suggestions_before_settings(settings, qtbot):
         assert facade.opened
         QTest.keyClick(window, Qt.Key.Key_Escape)
         qtbot.waitUntil(lambda: not facade.opened)
+    finally:
+        facade.reject()
+        engine.deleteLater()
+
+
+@pytest.mark.parametrize("key", [Qt.Key.Key_Return, Qt.Key.Key_Tab])
+def test_template_editor_accepts_a_token_without_replacing_neighbouring_unicode_text(settings, qtbot, key):
+    host, facade = settings
+    original = host.app_settings
+    engine = QQmlApplicationEngine()
+    engine.setInitialProperties({"settings": facade})
+    qml = Path(__file__).parents[2] / "src/metadata_polisher/ui/quick/qml/SettingsWindow.qml"
+    engine.load(QUrl.fromLocalFile(str(qml)))
+
+    try:
+        window = engine.rootObjects()[0]
+        facade.open()
+        window.requestActivate()
+        qtbot.waitUntil(window.isActive)
+        editor = window.findChild(QObject, "settingsTemplate")
+        editor.forceActiveFocus()
+        editor.setProperty("text", "😀 %tit% [%discnumber%.]")
+        editor.setProperty("cursorPosition", 7)
+        assert QMetaObject.invokeMethod(editor, "refreshCompletions")
+        suggestions = window.findChild(QObject, "templateSuggestions")
+        qtbot.waitUntil(lambda: suggestions.property("opened"))
+
+        # The emoji occupies two UTF-16 units. Both the text editor and facade
+        # must retain the surrounding text while replacing the incomplete token.
+        QTest.keyClick(window, key)
+        expected = "😀 %title% [%discnumber%.]"
+        qtbot.waitUntil(lambda: editor.property("text") == expected)
+        assert facade.draft["template"] == expected
+        assert not suggestions.property("opened")
+        assert facade.opened
+        assert host.app_settings is original
     finally:
         facade.reject()
         engine.deleteLater()

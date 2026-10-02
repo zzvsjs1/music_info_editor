@@ -989,16 +989,21 @@ class ApplyBatchResult:
             if any(file.transaction_result is not None for file in files):
                 raise ValueError("a blocked batch cannot contain transaction results")
 
-        # Walk in execution order to validate causality: once cancellation has
-        # stopped the batch, every later file must be recorded as never started.
+        # A preflight-only result can preserve no-op files anywhere in the
+        # selection: deriving NO_CHANGES does not start a transaction. Once any
+        # transaction has run, retain the stricter ordered cancellation rule.
+        transactions_present = any(file.transaction_result is not None for file in files)
         safe_cancellation_boundary_seen = False
         cancellation_seen = False
 
         for file in files:
-            if cancellation_seen and not (
+            cancelled_before_start = (
                 file.status is ApplyFileOutcomeStatus.SKIPPED
                 and file.skip_reason is ApplySkipReason.CANCELLED_BEFORE_START
-            ):
+            )
+            preflight_no_change = not transactions_present and file.status is ApplyFileOutcomeStatus.NO_CHANGES
+
+            if cancellation_seen and not (cancelled_before_start or preflight_no_change):
                 raise ValueError("no transaction or non-cancel outcome may run after cancellation")
 
             if (
@@ -1067,6 +1072,26 @@ class _PreparedGroup:
     files: tuple[_PreparedFile, ...]
 
 
+@dataclass(frozen=True)
+class _BatchPreflight:
+    """Retain every file plan, including uninspected drafts after cancellation."""
+
+    groups: tuple[_PreparedGroup, ...]
+    cancelled: bool
+
+
+@dataclass
+class _ApplyExecution:
+    """Batch-wide progress which must survive the boundary between albums.
+
+    Album failure is deliberately kept outside this object: it stops only that
+    album. Cancellation and the first transaction boundary apply to all albums.
+    """
+
+    cancelled: bool = False
+    transaction_seen: bool = False
+
+
 class _DiscardEventSink:
     def emit(self, event: OperationEvent) -> None:
         del event
@@ -1101,6 +1126,75 @@ class ApplyService:
         total_files = sum(len(group.files) for group in request.groups)
         active_events.emit(OperationStageChanged(request.operation_id, ApplyStage.PREFLIGHTING))
         active_events.emit(OperationProgress(request.operation_id, ApplyStage.PREFLIGHTING, 0, total_files))
+
+        drafts = self._build_drafts(request)
+        preflight = self._preflight_groups(request, drafts, cancellation, active_events, total_files)
+        prepared_groups = list(preflight.groups)
+
+        if preflight.cancelled:
+            return self._finish_without_transactions(
+                request,
+                prepared_groups,
+                batch_blocked=self._batch_blocked(prepared_groups),
+                events=active_events,
+            )
+
+        # Individual files may pass while the batch still collides or exhausts
+        # backup space. Resolve shared constraints before entering any writer.
+        prepared_groups = self._apply_batch_capacity(request, prepared_groups)
+        prepared_groups = self._apply_batch_path_collisions(request, prepared_groups)
+        batch_blocked = self._batch_blocked(prepared_groups)
+
+        requested_operation_present = any(
+            self._has_file_operation(prepared.change_set)
+            for prepared_group in prepared_groups
+            for prepared in prepared_group.files
+        )
+
+        if (
+            batch_blocked
+            or cancellation.is_cancelled()
+            or not requested_operation_present
+        ):
+            return self._finish_without_transactions(
+                request,
+                prepared_groups,
+                batch_blocked=batch_blocked,
+                events=active_events,
+            )
+
+        group_outcomes = self._execute_groups(request, prepared_groups, cancellation, active_events, total_files)
+        prepared_by_file_id = {
+            prepared.request.source.file_id: prepared
+            for group in preflight.groups
+            for prepared in group.files
+        }
+
+        # Populate the result from an actual reread after commit. Proposed final
+        # values alone cannot prove what the adapter persisted on disk.
+        group_outcomes = self._refresh_written_files(request, group_outcomes, prepared_by_file_id, active_events)
+        status = _derive_batch_status(group_outcomes)
+        # Optional report failure is separate from audio-write success; deriving
+        # status first prevents a logging problem from rewriting transaction truth.
+        report_result = self._write_report(
+            request,
+            tuple(group_outcomes),
+            status,
+            active_events,
+        )
+
+        return ApplyBatchResult(
+            operation_id=request.operation_id,
+            base_session_revision=request.base_session_revision,
+            base_library_revision=request.base_library_revision,
+            status=status,
+            groups=tuple(group_outcomes),
+            report_result=report_result,
+        )
+
+    @staticmethod
+    def _build_drafts(request: ApplyBatchRequest) -> tuple[_DraftGroup, ...]:
+        """Derive the complete review plan before consulting the filesystem."""
         draft_groups: list[_DraftGroup] = []
 
         # Derive every pure draft before the first external probe. This preserves
@@ -1124,6 +1218,17 @@ class ApplyService:
 
             draft_groups.append(_DraftGroup(request=group, files=tuple(drafts)))
 
+        return tuple(draft_groups)
+
+    def _preflight_groups(
+        self,
+        request: ApplyBatchRequest,
+        draft_groups: Sequence[_DraftGroup],
+        cancellation: CancellationToken,
+        active_events: OperationEventSink,
+        total_files: int,
+    ) -> _BatchPreflight:
+        """Probe in order, retaining the same cancellation observation points."""
         prepared_groups: list[_PreparedGroup] = []
         prepared_by_file_id: dict[str, _PreparedFile] = {}
         prepared_count = 0
@@ -1133,71 +1238,13 @@ class ApplyService:
             prepared_files: list[_PreparedFile] = []
 
             for draft in draft_group.files:
-                file_request = draft.request
-                proposed = draft.change_set
-                operation_requested = self._needs_external_preflight(proposed)
+                if self._needs_external_preflight(draft.change_set) and cancellation.is_cancelled():
+                    preflight_cancelled = True
+                    break
 
-                if operation_requested:
-                    if cancellation.is_cancelled():
-                        preflight_cancelled = True
-
-                        break
-
-                    snapshot = self._preflight.inspect(
-                        file_request.source,
-                        proposed,
-                        request.backup,
-                    )
-
-                    if snapshot.file_id != file_request.source.file_id:
-                        raise ValueError("preflight snapshot must refer to the inspected file")
-
-                    fresh_facts = replace(
-                        snapshot.validation,
-                        track_mapping_resolved=file_request.track_mapping_resolved,
-                        backup_root_writable=(
-                            snapshot.validation.backup_root_writable
-                            if request.backup.enabled
-                            else True
-                        ),
-                        backup_destination_available=(
-                            snapshot.validation.backup_destination_available
-                            if request.backup.enabled
-                            else True
-                        ),
-                        backup_space_sufficient=(
-                            snapshot.validation.backup_space_sufficient
-                            if request.backup.enabled
-                            else True
-                        ),
-                    )
-                    change_set = build_change_set(
-                        file_request.source,
-                        file_request.reviews,
-                        file_request.rename_decision,
-                        request.rename_template,
-                        request.rename_policy,
-                        fresh_facts,
-                    )
-                    adapter = snapshot.adapter
-                else:
-                    change_set = proposed
-                    adapter = None
-                    fresh_facts = draft.validation
-                    capacity = None
-
-                if operation_requested:
-                    capacity = snapshot.capacity
-
-                prepared = _PreparedFile(
-                    file_request,
-                    change_set,
-                    adapter,
-                    fresh_facts,
-                    capacity,
-                )
+                prepared = self._prepare_file(request, draft)
                 prepared_files.append(prepared)
-                prepared_by_file_id[file_request.source.file_id] = prepared
+                prepared_by_file_id[draft.request.source.file_id] = prepared
                 prepared_count += 1
                 active_events.emit(
                     OperationProgress(
@@ -1221,77 +1268,81 @@ class ApplyService:
                 break
 
         if preflight_cancelled:
-            cancellation_groups: list[_PreparedGroup] = []
+            prepared_groups = self._retain_uninspected_drafts(draft_groups, prepared_by_file_id)
 
-            # Preserve every draft, including files not yet probed. Already
-            # inspected files retain their fresh facts; the others retain their
-            # pure plan so a cancelled batch still reports no-change files truthfully.
-            for draft_group in draft_groups:
-                cancellation_files: list[_PreparedFile] = []
+        return _BatchPreflight(tuple(prepared_groups), preflight_cancelled)
 
-                for draft in draft_group.files:
-                    cancellation_file = prepared_by_file_id.get(draft.request.source.file_id)
+    def _prepare_file(self, request: ApplyBatchRequest, draft: _DraftFile) -> _PreparedFile:
+        """Refresh external facts only when a file actually requests an operation."""
+        file_request = draft.request
 
-                    if cancellation_file is None:
-                        cancellation_file = _PreparedFile(
-                            request=draft.request,
-                            change_set=draft.change_set,
-                            adapter=None,
-                            validation=draft.validation,
-                            capacity=None,
-                        )
+        if not self._needs_external_preflight(draft.change_set):
+            return _PreparedFile(file_request, draft.change_set, None, draft.validation, None)
 
-                    cancellation_files.append(cancellation_file)
+        snapshot = self._preflight.inspect(file_request.source, draft.change_set, request.backup)
 
-                cancellation_groups.append(
-                    _PreparedGroup(request=draft_group.request, files=tuple(cancellation_files))
-                )
+        if snapshot.file_id != file_request.source.file_id:
+            raise ValueError("preflight snapshot must refer to the inspected file")
 
-            return self._finish_without_transactions(
-                request,
-                cancellation_groups,
-                batch_blocked=any(
-                    prepared.change_set.status is ChangeSetStatus.BLOCKED
-                    for prepared_group in cancellation_groups
-                    for prepared in prepared_group.files
-                ),
-                events=active_events,
-            )
+        fresh_facts = replace(
+            snapshot.validation,
+            track_mapping_resolved=file_request.track_mapping_resolved,
+            backup_root_writable=snapshot.validation.backup_root_writable if request.backup.enabled else True,
+            backup_destination_available=(
+                snapshot.validation.backup_destination_available if request.backup.enabled else True
+            ),
+            backup_space_sufficient=snapshot.validation.backup_space_sufficient if request.backup.enabled else True,
+        )
+        change_set = build_change_set(
+            file_request.source, file_request.reviews, file_request.rename_decision,
+            request.rename_template, request.rename_policy, fresh_facts,
+        )
+        return _PreparedFile(file_request, change_set, snapshot.adapter, fresh_facts, snapshot.capacity)
 
-        # Individual files may pass while the batch still collides or exhausts
-        # backup space. Resolve shared constraints before entering any writer.
-        prepared_groups = self._apply_batch_capacity(request, prepared_groups)
-        prepared_groups = self._apply_batch_path_collisions(request, prepared_groups)
-        batch_blocked = any(
+    @staticmethod
+    def _retain_uninspected_drafts(
+        drafts: Sequence[_DraftGroup], inspected: dict[str, _PreparedFile],
+    ) -> list[_PreparedGroup]:
+        """Keep no-change truth for files which cancellation prevented probing."""
+        groups: list[_PreparedGroup] = []
+
+        for group in drafts:
+            files: list[_PreparedFile] = []
+
+            for draft in group.files:
+                prepared = inspected.get(draft.request.source.file_id)
+
+                if prepared is None:
+                    prepared = _PreparedFile(draft.request, draft.change_set, None, draft.validation, None)
+
+                files.append(prepared)
+
+            groups.append(_PreparedGroup(group.request, tuple(files)))
+
+        return groups
+
+    @staticmethod
+    def _batch_blocked(groups: Sequence[_PreparedGroup]) -> bool:
+        return any(
             prepared.change_set.status is ChangeSetStatus.BLOCKED
-            for prepared_group in prepared_groups
-            for prepared in prepared_group.files
+            for group in groups
+            for prepared in group.files
         )
 
-        requested_operation_present = any(
-            self._has_file_operation(prepared.change_set)
-            for prepared_group in prepared_groups
-            for prepared in prepared_group.files
-        )
-
-        if (
-            batch_blocked
-            or cancellation.is_cancelled()
-            or not requested_operation_present
-        ):
-            return self._finish_without_transactions(
-                request,
-                prepared_groups,
-                batch_blocked=batch_blocked,
-                events=active_events,
-            )
-
+    def _execute_groups(
+        self,
+        request: ApplyBatchRequest,
+        prepared_groups: Sequence[_PreparedGroup],
+        cancellation: CancellationToken,
+        active_events: OperationEventSink,
+        total_files: int,
+    ) -> list[ApplyGroupOutcome]:
+        """Resolve files in order; album failure and batch cancellation stay distinct."""
         active_events.emit(OperationStageChanged(request.operation_id, ApplyStage.APPLYING_FILES))
         active_events.emit(OperationProgress(request.operation_id, ApplyStage.APPLYING_FILES, 0, total_files))
         completed_count = 0
         group_outcomes: list[ApplyGroupOutcome] = []
-        cancelled = False
-        transaction_seen = False
+        execution = _ApplyExecution()
 
         # A failure stops the remaining writes in that album only. Cancellation
         # persists across albums, while successful earlier files remain committed.
@@ -1301,55 +1352,10 @@ class ApplyService:
             album_failed = False
 
             for prepared in prepared_group.files:
-                if not self._has_file_operation(prepared.change_set):
-                    if cancelled or (
-                        transaction_seen and cancellation.is_cancelled()
-                    ):
-                        cancelled = True
-                        outcome = self._skipped(
-                            group,
-                            prepared,
-                            ApplySkipReason.CANCELLED_BEFORE_START,
-                        )
-                    else:
-                        outcome = self._no_changes(group, prepared)
-                elif cancelled or cancellation.is_cancelled():
-                    cancelled = True
-                    outcome = self._skipped(
-                        group,
-                        prepared,
-                        ApplySkipReason.CANCELLED_BEFORE_START,
-                    )
-                elif album_failed:
-                    outcome = self._skipped(
-                        group,
-                        prepared,
-                        ApplySkipReason.ALBUM_STOPPED_AFTER_FAILURE,
-                    )
-                else:
-                    if prepared.adapter is None:
-                        raise ValueError("a writable prepared file requires an adapter")
-
-                    # The writer owns cancellation inside this file transaction;
-                    # this loop checks the token again before starting the next.
-                    transaction = self._writer.apply_file(
-                        prepared.request.source,
-                        prepared.change_set,
-                        prepared.adapter,
-                        request.backup,
-                        cancellation,
-                        active_events,
-                    )
-                    transaction_seen = True
-                    self._validate_writer_result(prepared, transaction)
-                    outcome = self._transaction_outcome(group, prepared, transaction)
-
-                    if transaction.status is FileApplyStatus.FAILED:
-                        album_failed = True
-
-                    if transaction.status is FileApplyStatus.CANCELLED:
-                        cancelled = True
-
+                outcome = self._execute_file(
+                    request, group, prepared, execution, album_failed, cancellation, active_events,
+                )
+                album_failed = album_failed or outcome.status is ApplyFileOutcomeStatus.FAILED
                 file_outcomes.append(outcome)
 
                 if outcome.status is ApplyFileOutcomeStatus.NO_CHANGES:
@@ -1388,27 +1394,72 @@ class ApplyService:
                 ApplyGroupOutcome(group.group_id, group.base_group_revision, tuple(file_outcomes))
             )
 
-        # Populate the result from an actual reread after commit. Proposed final
-        # values alone cannot prove what the adapter persisted on disk.
-        group_outcomes = self._refresh_written_files(request, group_outcomes, prepared_by_file_id, active_events)
-        status = _derive_batch_status(group_outcomes)
-        # Optional report failure is separate from audio-write success; deriving
-        # status first prevents a logging problem from rewriting transaction truth.
-        report_result = self._write_report(
-            request,
-            tuple(group_outcomes),
-            status,
-            active_events,
-        )
+        return group_outcomes
 
-        return ApplyBatchResult(
-            operation_id=request.operation_id,
-            base_session_revision=request.base_session_revision,
-            base_library_revision=request.base_library_revision,
-            status=status,
-            groups=tuple(group_outcomes),
-            report_result=report_result,
-        )
+    def _execute_file(
+        self,
+        request: ApplyBatchRequest,
+        group: ApplyGroupRequest,
+        prepared: _PreparedFile,
+        execution: _ApplyExecution,
+        album_failed: bool,
+        cancellation: CancellationToken,
+        events: OperationEventSink,
+    ) -> ApplyFileOutcome:
+        """Resolve one file without changing the established outcome precedence.
+
+        A no-change file survives an earlier album failure. After a transaction
+        or an observed cancellation, however, cancellation also skips no-ops.
+        Keep the token checks in these branches: querying it early would move
+        the cancellation boundary relative to progress callbacks and writes.
+        """
+        if not self._has_file_operation(prepared.change_set):
+            if execution.cancelled or (
+                execution.transaction_seen and cancellation.is_cancelled()
+            ):
+                execution.cancelled = True
+                outcome = self._skipped(
+                    group,
+                    prepared,
+                    ApplySkipReason.CANCELLED_BEFORE_START,
+                )
+            else:
+                outcome = self._no_changes(group, prepared)
+        elif execution.cancelled or cancellation.is_cancelled():
+            execution.cancelled = True
+            outcome = self._skipped(
+                group,
+                prepared,
+                ApplySkipReason.CANCELLED_BEFORE_START,
+            )
+        elif album_failed:
+            outcome = self._skipped(
+                group,
+                prepared,
+                ApplySkipReason.ALBUM_STOPPED_AFTER_FAILURE,
+            )
+        else:
+            if prepared.adapter is None:
+                raise ValueError("a writable prepared file requires an adapter")
+
+            # The writer owns cancellation inside this file transaction;
+            # this loop checks the token again before starting the next.
+            transaction = self._writer.apply_file(
+                prepared.request.source,
+                prepared.change_set,
+                prepared.adapter,
+                request.backup,
+                cancellation,
+                events,
+            )
+            execution.transaction_seen = True
+            self._validate_writer_result(prepared, transaction)
+            outcome = self._transaction_outcome(group, prepared, transaction)
+
+            if transaction.status is FileApplyStatus.CANCELLED:
+                execution.cancelled = True
+
+        return outcome
 
     @staticmethod
     def _refresh_written_files(

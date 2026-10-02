@@ -40,6 +40,8 @@ Provider lookup, candidate explanations, search terms, track mapping, settings, 
 
 Click a column header to sort albums, files and secondary tables; click again to reverse the order. Arrows show the active direction. Files initially follow **Disc → Track → File**, using numeric positions rather than filename order. A track without a disc number belongs to disc 1 for this display; missing tracks follow numbered tracks on their disc, and files without either number follow the numbered files in filename order. Right-click a file header and choose **Disc / track order** to restore this default. Selection, write inclusion and review navigation follow the same files when sorting changes. Metadata review fields retain their fixed order.
 
+Use **Left/Right** to reveal table columns and **Menu** or **Shift+F10** to open column settings from the keyboard. In short windows, **More actions** contains Settings, language, diagnostics and secondary lookup commands; **More…** beside Metadata review contains Clear selection and Rename files. Narrow metadata tables bring **Field, Final, Status** to the front; scroll horizontally for Existing and Proposed, or use Show full values. Entering a different folder displays the currently loaded library separately, and cancelling its replacement restores the loaded path.
+
 ## Review and apply
 
 Manual field editing is available after scanning, even without an online lookup.
@@ -77,6 +79,8 @@ Shortcuts respect their window and editor contexts. Opening the final summary do
 8. The results view opens when writing finishes and remains reachable through **Apply results…**. Successfully reread files show **Written**, and the album list refreshes from their saved tags. Completed and unchanged files leave the next write batch; unfinished files stay included and unrelated pending reviews survive. You can review and include another album straight away. A failed reread or uncertain filesystem outcome explicitly requires a rescan.
 
 Splitting or merging groups retains manual values, Clear, Keep existing and filename choices. It resets release selection and track mapping; a warning identifies candidate choices that need review again and allows cancellation. Independent pending review choices remain undoable after regrouping.
+
+The final Apply summary identifies files by their paths relative to the scanned folder. Select a row to inspect each changed field's existing and final values before writing. Batch **Show full values** also lists each file's proposed values and their sources. An open **Filename previews** window follows the current review scope and refreshes when decisions change. Language and search-term changes retain Undo for independent manual, Keep existing and Clear decisions; Undo does not restore obsolete search evidence or completed writes. Candidate windows identify their captured local album and warn when the main window is showing another album.
 
 The default filename template is `[%discnumber%.]%tracknumber%. %title%`. Brackets make the enclosed content optional: disc 1, track 1 becomes `1.01. Title.flac`; without a disc number it becomes `01. Title.flac`. Settings provides the template and minimum digit widths from **1 to 10**, covering editable track/disc numbers without excessive padding. Invalid saved widths are reported and replaced with safe defaults. The original extension is retained, Windows filename problems are reported, and collisions require correction.
 

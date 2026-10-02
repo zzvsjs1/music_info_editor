@@ -92,7 +92,7 @@ Item {
                 gridLines: true
                 columns: [
                     {key: "file", label: "File", width: 230},
-                    {key: "fields", label: "Tag fields", width: 70, detailKey: "fieldNames", sortType: "number"},
+                    {key: "fields", label: "Tag fields", width: 70, detailKey: "fieldDetails", sortType: "number"},
                     {key: "decision", label: "Filename decision", width: 130},
                     {key: "final", label: "Final filename", width: 230}
                 ]

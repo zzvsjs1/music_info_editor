@@ -1,7 +1,7 @@
 """Read-only metadata diff rows for one selected reviewed file."""
 
 from dataclasses import dataclass
-from typing import cast
+from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPersistentModelIndex, Qt
 
@@ -72,6 +72,19 @@ def format_field_value(value: FieldValue | None) -> str:
         return f"{value.number or '—'}/{value.total}"
 
     return value
+
+
+def format_library_path(path: Path, root: Path | None) -> str:
+    """Identify a file within its scanned library without hiding its directory."""
+    if root is not None:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            # Unusual imported snapshots may not share the root's path form.
+            # Retain their unambiguous path rather than collapsing to a basename.
+            pass
+
+    return path.as_posix()
 
 
 def _is_empty(value: FieldValue | None) -> bool:
@@ -156,7 +169,28 @@ def _tooltip(review: FieldReviewState) -> str:
         )
     )
 
-    return "\n".join(codes) if codes else "No review reason codes."
+    lines = list(codes) or ["No review reason codes."]
+
+    # Keep the evidence attached to each proposal. A batch can contain mixed
+    # suggestions, and its copyable details must explain the value before the
+    # user accepts it, including which release supplied that particular text.
+    for proposal in review.proposals:
+        lines.append(f"Proposal: {format_field_value(proposal.value)} · {proposal.confidence.value}")
+
+        for member in proposal.members:
+            provenance = member.provenance
+            lines.append(f"Sources: {provenance.engine_id} / {provenance.source_id}")
+
+            if provenance.record_id is not None:
+                lines.append(f"Record: {provenance.record_id}")
+
+            if provenance.source_url is not None:
+                lines.append(f"Source URL: {provenance.source_url}")
+
+            if provenance.language is not None:
+                lines.append(f"Language: {provenance.language}")
+
+    return "\n".join(lines)
 
 
 def _metadata_value(metadata: MetadataSnapshot, field: MetadataField) -> FieldValue | None:
@@ -248,10 +282,10 @@ def _diff_rows(
         # already resolved the retained number/total, so it is the final preview's
         # authority just as it is the writer's authority.
         if reviewed is not None and reviewed.change_set is not None:
-            final = cast(FieldValue | None, next(
+            final = next(
                 (change.new_value for change in reviewed.change_set.metadata_changes if change.field is field),
                 review.existing_value,
-            ))
+            )
 
         status = _status(review)
 
@@ -329,6 +363,12 @@ class MetadataDiffModel(QAbstractTableModel):
                                                      if reviewed.file_id == source.file_id), None), state.written_files)
             for group in state.groups for source in group.group.files if source.file_id in file_ids
         }
+        paths = {
+            source.file_id: format_library_path(source.path, state.root)
+            for group in state.groups
+            for source in group.group.files
+            if source.file_id in file_ids
+        }
 
         def text(value: AggregatedValue, *, proposed: bool = False) -> str:
             # Mixed is only a display label. The aggregate retains its typed state
@@ -344,8 +384,14 @@ class MetadataDiffModel(QAbstractTableModel):
 
         for index, item in enumerate(aggregate):
             statuses = tuple(dict.fromkeys(rows[index].values[1] for rows in per_file.values()))
-            details = "\n".join(f"{file_id}: {rows[index].values[2]} → {rows[index].values[4]}"
-                                for file_id, rows in per_file.items())
+            details = "\n\n".join(
+                f"File: {paths[file_id]}\n"
+                f"Existing: {file_rows[index].values[2]}\n"
+                f"Proposed: {file_rows[index].values[3]}\n"
+                f"Final: {file_rows[index].values[4]}\n"
+                f"{file_rows[index].tooltip}"
+                for file_id, file_rows in per_file.items()
+            )
             rows.append(DiffRow(item.field, (
                 FIELD_LABELS[item.field], " / ".join(statuses), text(item.existing), text(item.proposed, proposed=True),
                 text(item.final), "Per-file sources in details",

@@ -12,6 +12,9 @@ Control {
     property var columnWidths: []
     property var columnTitles: model ? model.columnTitles : []
     property var hiddenColumns: []
+    // Exact preferred widths drive responsive ordering. The TableView's
+    // estimated content size can vary with whichever columns are loaded.
+    property real preferredVisibleColumnsWidth: 0
     // These lists contain model column indices. Moving their visual positions
     // must not change persisted widths or the field identified by a command.
     property var columnOrder: []
@@ -89,8 +92,14 @@ Control {
     }
 
     onCurrentRowChanged: Qt.callLater(revealCurrentRow)
-    onHiddenColumnsChanged: { if (table) table.forceLayout(); }
-    onColumnWidthsChanged: { if (table) table.forceLayout(); }
+    onHiddenColumnsChanged: {
+        if (table) table.forceLayout();
+        Qt.callLater(updatePreferredVisibleColumnsWidth);
+    }
+    onColumnWidthsChanged: {
+        if (table) table.forceLayout();
+        Qt.callLater(updatePreferredVisibleColumnsWidth);
+    }
     onColumnOrderChanged: Qt.callLater(applyColumnOrder)
     onStretchColumnsChanged: { if (table) table.forceLayout(); }
     onWidthChanged: { if (table && (stretchLastColumn || stretchColumns.length)) table.forceLayout(); }
@@ -139,6 +148,10 @@ Control {
 
         appliedColumnOrder = order;
         table.forceLayout();
+
+        // An automatic layout change gives the leading columns a new meaning.
+        // Reveal that context instead of keeping an offset into the old order.
+        table.contentX = table.originX;
     }
 
     function requestSort(column) {
@@ -154,6 +167,27 @@ Control {
     function preferredColumnWidth(column) {
         const explicit = table.explicitColumnWidth(visualColumn(column));
         return explicit >= 36 ? explicit : (columnWidths[column] || 160);
+    }
+
+    function updatePreferredVisibleColumnsWidth() {
+        if (!table || table.columns === 0) {
+            return;
+        }
+
+        let total = 0;
+
+        for (let column = 0; column < columnTitles.length; column++) {
+            if (hiddenColumns.indexOf(column) < 0) {
+                total += preferredColumnWidth(column);
+            }
+        }
+
+        // Layout notifications also cover header dragging, whose explicit
+        // widths are exposed through methods rather than bindable properties.
+        // Only publish a changed total; spare stretched space is not preferred.
+        if (preferredVisibleColumnsWidth !== total) {
+            preferredVisibleColumnsWidth = total;
+        }
     }
 
     function logicalColumn(visual) {
@@ -234,11 +268,34 @@ Control {
         }
     }
 
+    function openColumnMenu() {
+        // Keep recovery available when every column is hidden. A keyboard
+        // invocation uses the fixed header edge, never the pointer position.
+        headerMenu.popup(root, 0, root.headerHeight);
+
+        for (let index = 0; index < headerMenu.count; index++) {
+            const item = headerMenu.itemAt(index);
+
+            if (item && item.visible && item.enabled) {
+                headerMenu.currentIndex = index;
+                item.forceActiveFocus();
+                break;
+            }
+        }
+    }
+
     Keys.onPressed: function(event) {
         const control = Boolean(event.modifiers & Qt.ControlModifier);
         const extend = Boolean(event.modifiers & Qt.ShiftModifier);
         const page = Math.max(1, Math.floor(table.height / root.rowHeight));
         let delta = null;
+
+        if (event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && event.modifiers === Qt.ShiftModifier)) {
+            root.openColumnMenu();
+            event.accepted = true;
+            return;
+        }
 
         // Keep row movement in the existing stable-ID backend commands. The
         // viewport supplies only a distance, and Shift retains the same anchor
@@ -459,6 +516,7 @@ Control {
 
             onRowsChanged: Qt.callLater(root.revealCurrentRow)
             onColumnsChanged: Qt.callLater(root.applyColumnOrder)
+            onLayoutChanged: Qt.callLater(root.updatePreferredVisibleColumnsWidth)
 
             // The attached bar still follows TableView's content position,
             // while its visual parent is the dedicated gutter below the view.

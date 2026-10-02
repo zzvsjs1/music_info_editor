@@ -18,6 +18,7 @@ from metadata_polisher.application.apply import (
 from metadata_polisher.application.apply_summary import ApplySummary, build_apply_summary
 from metadata_polisher.application.changes import ChangeIssueSeverity, RenameDecision
 from metadata_polisher.domain.errors import MediaErrorCode
+from metadata_polisher.domain.metadata import metadata_value
 from metadata_polisher.execution.cancellation import CancellationToken
 from metadata_polisher.execution.events import FileSkipReason, OperationEventSink
 from metadata_polisher.infrastructure.logging_setup import redact_sensitive_text
@@ -33,7 +34,7 @@ from metadata_polisher.session.state import (
     apply_batch_result,
     mark_groups_requires_rescan,
 )
-from metadata_polisher.ui.models.diff_model import FIELD_LABELS
+from metadata_polisher.ui.models.diff_model import FIELD_LABELS, format_field_value, format_library_path
 
 if TYPE_CHECKING:
     from metadata_polisher.ui.quick.backend import QuickBackend
@@ -99,12 +100,24 @@ class QuickApply(QObject):
         self._rename_error = ""
         self._previews_visible = False
         self._preview_rows: list[dict[str, str]] = []
+        self._preview_state: SessionState | None = None
+        self._preview_file_ids: tuple[str, ...] = ()
 
-        host.changed.connect(self.changed)
+        host.changed.connect(self._host_changed)
         host.bridge.completed.connect(self._completed)
         host.bridge.cancelled.connect(self._cancelled)
         host.bridge.failed.connect(self._failed)
         host.controller_failed.connect(self._record_controller_failure)
+
+    @Slot()
+    def _host_changed(self) -> None:
+        # The non-modal preview follows the same live review as the main table.
+        # Refresh its data before notifying QML, so a signal cannot publish old
+        # filenames or decisions alongside a newer review scope.
+        if self._previews_visible:
+            self._refresh_previews()
+
+        self.changed.emit()
 
     def _idle(self) -> bool:
         return self._host.session_state.active_operation is None
@@ -240,14 +253,27 @@ class QuickApply(QObject):
             final_name = change.rename_preview.new_path.name if rename and change.rename_preview else source.path.name
 
             # Keep the compact count in the table, but expose the actual fields
-            # in its tooltip and copyable details before authorising a write.
+            # and their captured changes in copyable details before a write.
+            # Relative paths distinguish same-named tracks in different albums
+            # without making the confirmation depend on a machine-specific root.
             fields = ", ".join(FIELD_LABELS[item.field] for item in change.metadata_changes)
+
+            # MetadataChange stores object values, but build_change_set derives
+            # them from these typed snapshots. Read the same fields through the
+            # domain accessor rather than casting arbitrary objects for display.
+            field_details = "\n".join(
+                f"{FIELD_LABELS[item.field]}: "
+                f"{format_field_value(metadata_value(source.read_result.metadata, item.field))}"
+                f" → {format_field_value(metadata_value(change.final_metadata, item.field))}"
+                for item in change.metadata_changes
+            )
             rows.append(
                 {
                     "id": source.file_id,
-                    "file": source.path.name,
+                    "file": format_library_path(source.path, state.root),
                     "fields": str(len(change.metadata_changes)),
                     "fieldNames": fields or "No tag changes",
+                    "fieldDetails": field_details or "No tag changes",
                     "decision": "Include rename" if rename else "Keep filename",
                     "final": final_name,
                 }
@@ -455,12 +481,29 @@ class QuickApply(QObject):
         if not self._idle():
             return
 
-        selected = set(self._host._scope_ids())
-
-        if not selected:
+        if not self._host._scope_ids():
             return
 
+        self._previews_visible = True
+        self._refresh_previews()
+        self.changed.emit()
+
+    def _refresh_previews(self) -> None:
+        """Keep the visible preview current without repeatedly rebuilding it."""
         state = self._host.session_state
+        file_ids = tuple(self._host._scope_ids())
+
+        # Progress, focus and window notifications often leave both inputs
+        # unchanged. Group objects contain the source snapshots and review
+        # decisions, so their immutable tuple also detects completed rescans.
+        if (
+            self._preview_state is not None
+            and self._preview_state.groups is state.groups
+            and self._preview_file_ids == file_ids
+        ):
+            return
+
+        selected = set(file_ids)
         reviews = {item.file_id: item for group in state.groups for item in group.reviewed_files}
         rows: list[dict[str, str]] = []
 
@@ -484,8 +527,9 @@ class QuickApply(QObject):
                     }
                 )
 
-        self._preview_rows, self._previews_visible = rows, True
-        self.changed.emit()
+        self._preview_rows = rows
+        self._preview_state = state
+        self._preview_file_ids = file_ids
 
     @Slot()
     def closePreviews(self) -> None:

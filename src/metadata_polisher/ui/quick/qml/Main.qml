@@ -11,6 +11,7 @@ ApplicationWindow {
                                                && !discardDialog.visible && !backend.confirmationVisible
                                                && !backend.libraryUi.discVisible
     readonly property bool compactHeight: height < metrics.mainCompactHeight
+    readonly property string loadedRoot: backend.rootPath
     property bool discardCloseConfirmed: false
     property string pendingScanPath: ""
     objectName: "quickWindow"
@@ -24,6 +25,96 @@ ApplicationWindow {
 
     UiMetrics {
         id: metrics
+    }
+
+    // Commands own their labels, availability and effects. Buttons and menus
+    // only choose where to present them; menu snapshots add a local stale-state
+    // check without disabling read-only diagnostics during a running operation.
+    Action {
+        id: findSelectedAction
+        text: "Find Metadata for Selected"
+        enabled: window.interactionEnabled && backend.lookupUi.canFind
+        onTriggered: backend.lookupUi.findSelected()
+    }
+
+    Action {
+        id: findAllAction
+        text: "Find All Incomplete"
+        enabled: window.interactionEnabled && backend.lookupUi.canFindAll
+        onTriggered: backend.lookupUi.findAll()
+    }
+
+    Action {
+        id: settingsAction
+        text: "Settings"
+        enabled: window.interactionEnabled
+        onTriggered: backend.settingsUi.open()
+    }
+
+    Action {
+        id: diagnosticsAction
+        text: "Diagnostics…"
+        onTriggered: {
+            diagnosticsWindow.show();
+            diagnosticsWindow.raise();
+            diagnosticsWindow.requestActivate();
+        }
+    }
+
+    Action {
+        id: clearFileSelectionAction
+        text: "Clear selection"
+        enabled: window.interactionEnabled && backend.selectedFileIds.length > 0
+        onTriggered: backend.clearSelection()
+    }
+
+    Action {
+        id: renameFilesAction
+        text: "Rename files…"
+        enabled: window.interactionEnabled && backend.applyUi.canRename
+        onTriggered: backend.applyUi.beginRename()
+    }
+
+    Action {
+        id: splitAction
+        text: "Split selected files"
+        enabled: window.interactionEnabled && backend.libraryUi.canSplit
+        onTriggered: backend.libraryUi.split()
+    }
+
+    Action {
+        id: mergeAction
+        text: "Merge groups"
+        enabled: window.interactionEnabled && backend.libraryUi.canMerge
+        onTriggered: backend.libraryUi.merge()
+    }
+
+    Action {
+        id: discAction
+        text: "Disc number…"
+        enabled: window.interactionEnabled && backend.libraryUi.canDisc
+        onTriggered: backend.libraryUi.beginDisc()
+    }
+
+    Action {
+        id: chooseCandidateAction
+        text: "Choose candidate…"
+        enabled: window.interactionEnabled && backend.lookupUi.canChoose
+        onTriggered: backend.lookupUi.showCandidates()
+    }
+
+    Action {
+        id: mapTracksAction
+        text: "Map tracks…"
+        enabled: window.interactionEnabled && backend.lookupUi.canMap
+        onTriggered: backend.lookupUi.beginMapping()
+    }
+
+    Action {
+        id: searchTermsAction
+        text: "Edit search terms…"
+        enabled: window.interactionEnabled && backend.groupId.length > 0
+        onTriggered: backend.lookupUi.beginSearch()
     }
 
     Component.onCompleted: {
@@ -61,6 +152,14 @@ ApplicationWindow {
             backend.scan(pendingScanPath, false);
         }
     }
+
+    function restoreLoadedPath() {
+        // Browsing assigns a draft imperatively. Restore the binding as well
+        // as the text, so a later successful replacement displays its new root.
+        folderPath.text = Qt.binding(function() { return backend.rootPath; });
+    }
+
+    onLoadedRootChanged: restoreLoadedPath()
 
     function openSelectedReview() {
         if (backend.selectedFileIds.length) {
@@ -173,6 +272,19 @@ ApplicationWindow {
             }
         }
 
+        Label {
+            objectName: "loadedLibraryLabel"
+            Layout.fillWidth: true
+            visible: backend.rootPath.length > 0 && folderPath.text !== backend.rootPath
+            text: "Loaded library: " + backend.rootPath
+            textFormat: Text.PlainText
+            elide: Text.ElideMiddle
+            Accessible.name: text
+            ToolTip.visible: loadedRootHover.hovered
+            ToolTip.text: text
+            HoverHandler { id: loadedRootHover }
+        }
+
         // Wrapping actions retain their full labels when larger desktop fonts
         // no longer fit a single row. The workspace receives the remaining height.
         Flow {
@@ -180,26 +292,28 @@ ApplicationWindow {
             spacing: metrics.controlSpacing
             ActionButton {
                 objectName: "findSelectedButton"
-                text: "Find Metadata for Selected"
-                enabled: window.interactionEnabled && backend.lookupUi.canFind
-                onClicked: backend.lookupUi.findSelected()
+                text: findSelectedAction.text
+                enabled: findSelectedAction.enabled
+                onClicked: findSelectedAction.trigger()
             }
 
             ActionButton {
                 objectName: "findAllIncompleteButton"
-                text: "Find All Incomplete"
-                enabled: window.interactionEnabled && backend.lookupUi.canFindAll
-                onClicked: backend.lookupUi.findAll()
+                text: findAllAction.text
+                visible: !window.compactHeight
+                enabled: findAllAction.enabled
+                onClicked: findAllAction.trigger()
             }
 
             ActionButton {
                 objectName: "groupToolsButton"
-                text: "Group tools"
+                text: window.compactHeight ? "More actions" : "Group tools"
                 onClicked: groupMenu.popup()
             }
 
             RowLayout {
                 spacing: metrics.controlSpacing
+                visible: !window.compactHeight
                 Label {
                     text: "Language:"
                 }
@@ -219,15 +333,18 @@ ApplicationWindow {
 
             ActionButton {
                 objectName: "settingsButton"
-                text: "Settings"
-                enabled: window.interactionEnabled
-                onClicked: backend.settingsUi.open()
+                text: settingsAction.text
+                visible: !window.compactHeight
+                enabled: settingsAction.enabled
+                onClicked: settingsAction.trigger()
             }
 
             ActionButton {
                 objectName: "diagnosticsButton"
-                text: "Diagnostics…"
-                onClicked: { diagnosticsWindow.show(); diagnosticsWindow.raise(); diagnosticsWindow.requestActivate(); }
+                text: diagnosticsAction.text
+                visible: !window.compactHeight
+                enabled: diagnosticsAction.enabled
+                onClicked: diagnosticsAction.trigger()
             }
         }
 
@@ -319,22 +436,32 @@ ApplicationWindow {
 
                     ActionButton {
                         objectName: "clearFileSelectionButton"
-                        text: "Clear selection"
-                        enabled: window.interactionEnabled && backend.selectedFileIds.length > 0
-                        onClicked: backend.clearSelection()
+                        text: clearFileSelectionAction.text
+                        visible: !window.compactHeight
+                        enabled: clearFileSelectionAction.enabled
+                        onClicked: clearFileSelectionAction.trigger()
                     }
 
                     ActionButton {
                         objectName: "renameFilesButton"
-                        text: "Rename files…"
-                        enabled: window.interactionEnabled && backend.applyUi.canRename
-                        onClicked: backend.applyUi.beginRename()
+                        text: renameFilesAction.text
+                        visible: !window.compactHeight
+                        enabled: renameFilesAction.enabled
+                        onClicked: renameFilesAction.trigger()
                     }
 
                     ActionButton {
                         objectName: "openReviewButton"
                         text: "Metadata review…"
                         onClicked: backend.openReview()
+                    }
+
+                    ActionButton {
+                        objectName: "compactFileActionsButton"
+                        text: "More…"
+                        visible: window.compactHeight
+                        enabled: window.interactionEnabled
+                        onClicked: compactFileMenu.popup()
                     }
                 }
 
@@ -487,6 +614,7 @@ ApplicationWindow {
             ActionButton {
                 objectName: "cancelButton"
                 text: backend.cancelling ? "Cancelling…" : "Cancel operation"
+                visible: backend.busy || !window.compactHeight
                 enabled: backend.busy && !backend.cancelling
                 onClicked: backend.cancelScan()
             }
@@ -494,6 +622,7 @@ ApplicationWindow {
 
         Label {
             Layout.fillWidth: true
+            visible: !window.compactHeight
             text: "Only Apply changes in the final confirmation writes files."
             wrapMode: Text.WordWrap
         }
@@ -535,12 +664,18 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
                 text: backend.applyUi.guidance
-                wrapMode: Text.WordWrap
+                wrapMode: window.compactHeight ? Text.NoWrap : Text.WordWrap
+                elide: window.compactHeight ? Text.ElideRight : Text.ElideNone
+                Accessible.name: text
+                ToolTip.visible: guidanceHover.hovered
+                ToolTip.text: text
+                HoverHandler { id: guidanceHover }
             }
 
             ActionButton {
                 objectName: "applyResultsButton"
                 text: "Apply results…"
+                visible: backend.applyUi.hasResults || !window.compactHeight
                 enabled: backend.applyUi.hasResults
                 onClicked: backend.applyUi.showResults()
             }
@@ -558,42 +693,84 @@ ApplicationWindow {
     Menu {
         id: groupMenu
         property int snapshotRevision: backend.revision
+        readonly property bool commandsCurrent: snapshotRevision === backend.revision
         onAboutToShow: snapshotRevision = backend.revision
-        enabled: snapshotRevision === backend.revision && window.interactionEnabled
+        // Short windows retain the primary lookup action above the table.
+        // Less frequent commands move here without losing their full labels.
         MenuItem {
-            text: "Split selected files"
-            enabled: backend.libraryUi.canSplit
-            onTriggered: backend.libraryUi.split()
+            text: findAllAction.text
+            visible: window.compactHeight
+            enabled: groupMenu.commandsCurrent && findAllAction.enabled
+            onTriggered: findAllAction.trigger()
+        }
+
+        Menu {
+            title: "Language"
+            enabled: groupMenu.commandsCurrent && window.interactionEnabled && backend.groupId.length > 0
+
+            Repeater {
+                model: backend.lookupUi.languageChoices
+
+                MenuItem {
+                    required property var modelData
+                    text: modelData.label
+                    checkable: true
+                    checked: backend.lookupUi.language === modelData.value
+                    onTriggered: backend.lookupUi.setLanguage(modelData.value)
+                }
+            }
         }
 
         MenuItem {
-            text: "Merge groups"
-            enabled: backend.libraryUi.canMerge
-            onTriggered: backend.libraryUi.merge()
+            text: settingsAction.text
+            visible: window.compactHeight
+            enabled: groupMenu.commandsCurrent && settingsAction.enabled
+            onTriggered: settingsAction.trigger()
         }
 
         MenuItem {
-            text: "Disc number…"
-            enabled: backend.libraryUi.canDisc
-            onTriggered: backend.libraryUi.beginDisc()
+            text: diagnosticsAction.text
+            visible: window.compactHeight
+            enabled: diagnosticsAction.enabled
+            onTriggered: diagnosticsAction.trigger()
+        }
+
+        MenuSeparator { visible: window.compactHeight }
+
+        MenuItem {
+            text: splitAction.text
+            enabled: groupMenu.commandsCurrent && splitAction.enabled
+            onTriggered: splitAction.trigger()
         }
 
         MenuItem {
-            text: "Choose candidate…"
-            enabled: backend.lookupUi.canChoose
-            onTriggered: backend.lookupUi.showCandidates()
+            text: mergeAction.text
+            enabled: groupMenu.commandsCurrent && mergeAction.enabled
+            onTriggered: mergeAction.trigger()
         }
 
         MenuItem {
-            text: "Map tracks…"
-            enabled: backend.lookupUi.canMap
-            onTriggered: backend.lookupUi.beginMapping()
+            text: discAction.text
+            enabled: groupMenu.commandsCurrent && discAction.enabled
+            onTriggered: discAction.trigger()
         }
 
         MenuItem {
-            text: "Edit search terms…"
-            enabled: window.interactionEnabled && backend.groupId.length > 0
-            onTriggered: backend.lookupUi.beginSearch()
+            text: chooseCandidateAction.text
+            enabled: groupMenu.commandsCurrent && chooseCandidateAction.enabled
+            onTriggered: chooseCandidateAction.trigger()
+        }
+
+        MenuItem {
+            text: mapTracksAction.text
+            enabled: groupMenu.commandsCurrent && mapTracksAction.enabled
+            onTriggered: mapTracksAction.trigger()
+        }
+
+        MenuItem {
+            text: searchTermsAction.text
+            enabled: groupMenu.commandsCurrent && searchTermsAction.enabled
+            onTriggered: searchTermsAction.trigger()
         }
 
         MenuSeparator {
@@ -601,12 +778,33 @@ ApplicationWindow {
 
         MenuItem {
             text: "Reset layout"
+            enabled: groupMenu.commandsCurrent && window.interactionEnabled
             onTriggered: window.resetLayout()
         }
 
         MenuItem {
             text: "Help and shortcuts (F1)"
+            enabled: groupMenu.commandsCurrent && window.interactionEnabled
             onTriggered: window.openHelp()
+        }
+    }
+
+    Menu {
+        id: compactFileMenu
+        property int snapshotRevision: backend.revision
+        onAboutToShow: snapshotRevision = backend.revision
+        enabled: snapshotRevision === backend.revision && window.interactionEnabled
+
+        MenuItem {
+            text: clearFileSelectionAction.text
+            enabled: clearFileSelectionAction.enabled
+            onTriggered: clearFileSelectionAction.trigger()
+        }
+
+        MenuItem {
+            text: renameFilesAction.text
+            enabled: renameFilesAction.enabled
+            onTriggered: renameFilesAction.trigger()
         }
     }
 
@@ -629,9 +827,9 @@ ApplicationWindow {
         }
 
         MenuItem {
-            text: "Rename files…"
-            enabled: backend.applyUi.canRename
-            onTriggered: backend.applyUi.beginRename()
+            text: renameFilesAction.text
+            enabled: renameFilesAction.enabled
+            onTriggered: renameFilesAction.trigger()
         }
 
         MenuItem {
@@ -659,45 +857,45 @@ ApplicationWindow {
         }
 
         MenuItem {
-            text: "Find Metadata for Selected\tCtrl+L"
-            enabled: backend.lookupUi.canFind
-            onTriggered: backend.lookupUi.findSelected()
+            text: findSelectedAction.text + "\tCtrl+L"
+            enabled: findSelectedAction.enabled
+            onTriggered: findSelectedAction.trigger()
         }
 
         MenuItem {
-            text: "Choose candidate…"
-            enabled: backend.lookupUi.canChoose
-            onTriggered: backend.lookupUi.showCandidates()
+            text: chooseCandidateAction.text
+            enabled: chooseCandidateAction.enabled
+            onTriggered: chooseCandidateAction.trigger()
         }
 
         MenuItem {
-            text: "Map tracks…"
-            enabled: backend.lookupUi.canMap
-            onTriggered: backend.lookupUi.beginMapping()
+            text: mapTracksAction.text
+            enabled: mapTracksAction.enabled
+            onTriggered: mapTracksAction.trigger()
         }
 
         MenuItem {
-            text: "Edit search terms…"
-            enabled: window.interactionEnabled
-            onTriggered: backend.lookupUi.beginSearch()
+            text: searchTermsAction.text
+            enabled: searchTermsAction.enabled
+            onTriggered: searchTermsAction.trigger()
         }
 
         MenuItem {
-            text: "Split selected files"
-            enabled: backend.libraryUi.canSplit
-            onTriggered: backend.libraryUi.split()
+            text: splitAction.text
+            enabled: splitAction.enabled
+            onTriggered: splitAction.trigger()
         }
 
         MenuItem {
-            text: "Merge groups"
-            enabled: backend.libraryUi.canMerge
-            onTriggered: backend.libraryUi.merge()
+            text: mergeAction.text
+            enabled: mergeAction.enabled
+            onTriggered: mergeAction.trigger()
         }
 
         MenuItem {
-            text: "Disc number…"
-            enabled: backend.libraryUi.canDisc
-            onTriggered: backend.libraryUi.beginDisc()
+            text: discAction.text
+            enabled: discAction.enabled
+            onTriggered: discAction.trigger()
         }
     }
 
@@ -767,6 +965,11 @@ ApplicationWindow {
         visible: false
         title: "Discard pending review work?"
         color: palette.window
+        onClosing: {
+            if (purpose === "scan") {
+                window.restoreLoadedPath();
+            }
+        }
 
         // A real transient window gives the warning a native title bar, close
         // button and keyboard focus. Its native close button is a safe cancel.

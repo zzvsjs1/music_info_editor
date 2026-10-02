@@ -11,10 +11,12 @@ from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import MediaReadResult, StreamInfo
 from metadata_polisher.domain.metadata import (
     FieldReadState,
+    FieldValue,
     MetadataChange,
     MetadataField,
     MetadataSnapshot,
     Position,
+    metadata_value,
 )
 from metadata_polisher.formats.base import MediaFormatError, TagReadResult, VerificationResult
 from metadata_polisher.formats.id3_policy import read_id3v1_tail
@@ -263,11 +265,7 @@ def _remove_keys(tags: MutableMapping[str, object], keys: Sequence[str]) -> None
             del tags[existing_key]
 
 
-def _metadata_value(snapshot: MetadataSnapshot, field: MetadataField) -> object:
-    return getattr(snapshot, field.value)
-
-
-def _expected_field_state(value: object) -> FieldReadState:
+def _expected_field_state(value: FieldValue | None) -> FieldReadState:
     if value is None or value == () or value == Position():
         return FieldReadState.MISSING
 
@@ -445,8 +443,8 @@ class TakAdapter:
         issues: list[Issue] = []
 
         for field in sorted(changed_fields, key=lambda item: item.value):
-            expected_value = _metadata_value(expected, field)
-            actual_value = _metadata_value(actual.metadata, field)
+            expected_value = metadata_value(expected, field)
+            actual_value = metadata_value(actual.metadata, field)
             expected_state = _expected_field_state(expected_value)
 
             if actual.field_states[field] is not expected_state or actual_value != expected_value:

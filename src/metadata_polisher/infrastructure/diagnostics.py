@@ -10,6 +10,7 @@ from threading import Lock
 from typing import Protocol, cast
 from uuid import uuid4
 
+from metadata_polisher.domain.metadata import metadata_value
 from metadata_polisher.domain.review import FieldReviewState, FieldValue
 from metadata_polisher.infrastructure.logging_setup import redact_sensitive_text
 from metadata_polisher.matching.release_scoring import MatchEvidence
@@ -270,7 +271,7 @@ def build_group_diagnostic_summary(group: GroupState) -> dict[str, object]:
                 "fields": [
                     _field_summary(
                         review,
-                        cast(FieldValue | None, getattr(file.change_set.final_metadata, review.field.value))
+                        metadata_value(file.change_set.final_metadata, review.field)
                         if file.change_set is not None
                         else None,
                     )

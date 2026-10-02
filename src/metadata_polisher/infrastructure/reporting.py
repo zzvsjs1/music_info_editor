@@ -335,8 +335,8 @@ class ReportFieldChange:
 
         return cls(
             field=change.field,
-            old_value=cast(FieldValue | None, change.old_value),
-            new_value=cast(FieldValue | None, change.new_value),
+            old_value=change.old_value,
+            new_value=change.new_value,
             decision=review.decision,
             decision_origin=review.decision_origin,
             provider_sources=provider_sources,

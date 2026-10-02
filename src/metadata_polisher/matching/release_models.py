@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from metadata_polisher.domain.matching import ProviderTrack, ReleaseCandidate, ReleaseMedium
+from metadata_polisher.domain.release_identity import ReleaseMediumIdentity
 
 
 # Release ranking asks which release plus medium fits a local group. It uses
@@ -318,13 +319,13 @@ class RankedReleaseMedium:
             raise TypeError("result must be ReleaseScore")
 
     @property
-    def identity(self) -> tuple[str, str, str, int]:
+    def identity(self) -> ReleaseMediumIdentity:
         """Return a compact stable identity suitable for logs and UI state."""
-        return (
-            self.release.engine_id,
-            self.release.source_id,
-            self.release.release_id,
-            self.medium_index,
+        return ReleaseMediumIdentity(
+            engine_id=self.release.engine_id,
+            source_id=self.release.source_id,
+            release_id=self.release.release_id,
+            medium_index=self.medium_index,
         )
 
 
@@ -342,7 +343,7 @@ class ReleaseRanking:
             raise TypeError("ambiguous must be a bool")
 
     @property
-    def identities(self) -> tuple[tuple[str, str, str, int], ...]:
+    def identities(self) -> tuple[ReleaseMediumIdentity, ...]:
         """Expose stable identities without discarding the full ranked entries."""
         return tuple(entry.identity for entry in self.entries)
 

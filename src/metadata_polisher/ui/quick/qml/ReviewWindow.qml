@@ -260,6 +260,7 @@ ApplicationWindow {
                         Label {
                             Layout.fillWidth: true
                             text: backend.reviewScopeLabel
+                                  + (reviewTable.compactColumns ? " · Final values first" : "")
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             color: palette.placeholderText
@@ -287,6 +288,10 @@ ApplicationWindow {
                 DataTable {
                     id: reviewTable
                     objectName: "reviewTable"
+                    // Preserve readable value widths. On a narrow viewport,
+                    // bring the write result and its status next to the field;
+                    // Existing and Proposed remain reachable by scrolling.
+                    readonly property bool compactColumns: width < preferredVisibleColumnsWidth + 2
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.minimumHeight: 195
@@ -295,7 +300,7 @@ ApplicationWindow {
                     enabled: reviewWindow.interactionEnabled
                     currentRow: backend.currentFieldRow
                     columnWidths: scaledWidths(metrics.reviewColumns)
-                    columnOrder: [0, 2, 3, 4, 1, 5]
+                    columnOrder: compactColumns ? [0, 4, 1, 2, 3, 5] : [0, 2, 3, 4, 1, 5]
                     stretchColumns: [2, 3, 4]
                     hiddenColumns: metrics.hiddenReviewColumns
                     protectedColumn: 0

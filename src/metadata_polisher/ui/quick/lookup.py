@@ -230,6 +230,34 @@ class QuickLookup(QObject):
 
         return "\n".join(texts)
 
+    def _candidate_local_context(self) -> str:
+        """Name the local evidence captured when this modeless chooser opened."""
+        captured = self._candidate_group
+
+        if captured is None:
+            return ""
+
+        # Album names alone are ambiguous in a library. Preserve every source
+        # directory in stable file order, including groups merged across folders.
+        folders = tuple(dict.fromkeys(str(source.path.parent) for source in captured.group.files))
+        folder_label = "Folder" if len(folders) == 1 else "Folders"
+        album = captured.group.album_title or "Untitled album"
+        return f"Local album: {album}\n{folder_label}: " + "\n".join(folders)
+
+    def _candidate_selection_notice(self) -> str:
+        """Explain a changed main selection without retargeting the candidate."""
+        captured = self._candidate_group
+        current = self._host._group()
+
+        if captured is None or (current is not None and current.group.group_id == captured.group.group_id):
+            return ""
+
+        selected = (
+            f"The main window now shows {current.group.album_title or 'Untitled album'}."
+            if current is not None else "The main window no longer has a selected album."
+        )
+        return f"{selected} Choosing a release still updates the local album shown above."
+
     def _language_choices(self) -> list[dict[str, str]]:
         return [
             {"value": value or "", "label": label}
@@ -358,6 +386,8 @@ class QuickLookup(QObject):
     candidateVisible = Property(bool, lambda self: self._candidate_visible, notify=changed)
     candidates = Property(list, _candidates, notify=changed)
     candidateNotices = Property(str, _notices, notify=changed)
+    candidateLocalContext = Property(str, _candidate_local_context, notify=changed)
+    candidateSelectionNotice = Property(str, _candidate_selection_notice, notify=changed)
     candidateKey = Property(str, lambda self: self._candidate_key, notify=changed)
     canAcceptCandidate = Property(
         bool,

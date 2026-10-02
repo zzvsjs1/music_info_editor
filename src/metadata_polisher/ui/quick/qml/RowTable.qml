@@ -8,7 +8,13 @@ Control {
     id: root
 
     property var rows: []
+    // Column maps cross the QML caller boundary once. Required members are key
+    // and label; optional width, detailKey, custom and checkable describe the
+    // presentation. sortType is text (default), number, duration or boolean;
+    // checkable columns default to boolean. sortValueKey and sortMissingValue
+    // can supply a separate ordering value and an unavailable-value sentinel.
     property var columns: []
+    readonly property var columnDefinitions: columns.map(normaliseColumn)
     property QtObject layout: null
     property string preferenceKey: ""
     property var columnWidths: []
@@ -56,8 +62,42 @@ Control {
     readonly property color gridColour: Qt.tint(palette.base,
         Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.15))
 
+    enum SortKind { TextSort, NumberSort, DurationSort, BooleanSort }
+
+    function normaliseColumn(column) {
+        const sortType = column.sortType || (column.checkable === true ? "boolean" : "text");
+        const kinds = {
+            text: RowTable.TextSort,
+            number: RowTable.NumberSort,
+            duration: RowTable.DurationSort,
+            boolean: RowTable.BooleanSort
+        };
+
+        if (typeof column.key !== "string" || typeof column.label !== "string") {
+            throw new Error("RowTable columns require string key and label members.");
+        }
+
+        if (!Object.prototype.hasOwnProperty.call(kinds, sortType)) {
+            throw new Error("Unknown RowTable sort type: " + sortType);
+        }
+
+        // All internal consumers use the same complete record. Defaults are
+        // resolved per column, never inferred from whichever row is compared.
+        return {
+            key: column.key,
+            label: column.label,
+            width: column.width || 160,
+            detailKey: column.detailKey || column.key,
+            custom: column.custom === true,
+            checkable: column.checkable === true,
+            sortKind: kinds[sortType],
+            sortValueKey: column.sortValueKey || column.key,
+            sortMissingValue: column.sortMissingValue
+        };
+    }
+
     function sortValue(row, column) {
-        const value = row[column.sortValueKey || column.key];
+        const value = row[column.sortValueKey];
 
         // Display placeholders and explicit sentinels describe unavailable
         // values. Keep them after meaningful values in either direction.
@@ -66,7 +106,7 @@ Control {
             return null;
         }
 
-        if (column.sortType === "duration") {
+        if (column.sortKind === RowTable.DurationSort) {
             const parts = String(value).split(":");
 
             if (parts.some(function(part) { return !/^\d+$/.test(part); })) {
@@ -78,7 +118,11 @@ Control {
             return parts.reduce(function(total, part) { return total * 60 + Number(part); }, 0);
         }
 
-        if (column.sortType === "number" || typeof value === "number" || typeof value === "boolean") {
+        if (column.sortKind === RowTable.BooleanSort) {
+            return value === true ? 1 : value === false ? 0 : null;
+        }
+
+        if (column.sortKind === RowTable.NumberSort) {
             const number = Number(value);
             return Number.isFinite(number) ? number : null;
         }
@@ -94,7 +138,7 @@ Control {
             return rows;
         }
 
-        const column = columns.find(function(item) { return item.key === sortKey; });
+        const column = columnDefinitions.find(function(item) { return item.key === sortKey; });
 
         if (!column) {
             return rows;
@@ -125,7 +169,7 @@ Control {
         // direct setColumnWidth dialogues use logical pixels. Persisted user
         // widths already describe the visible layout and must not scale twice.
         const scale = scaleColumnWidths ? textMetrics.advanceWidth("M") / 10 : 1;
-        const defaults = columns.map(function(column) { return Math.round((column.width || 160) * scale); });
+        const defaults = columnDefinitions.map(function(column) { return Math.round(column.width * scale); });
         columnWidths = layout && preferenceKey ? layout.columnWidths(preferenceKey, defaults) : defaults;
         hiddenColumns = layout && preferenceKey
             ? layout.hiddenColumns(preferenceKey, defaultHiddenColumns) : defaultHiddenColumns.slice();
@@ -142,8 +186,8 @@ Control {
             return 0;
         }
 
-        const base = columnWidths[index] || columns[index].width || 160;
-        let last = columns.length - 1;
+        const base = columnWidths[index] || columnDefinitions[index].width;
+        let last = columnDefinitions.length - 1;
 
         while (last >= 0 && hiddenColumns.indexOf(last) >= 0) {
             last--;
@@ -154,7 +198,7 @@ Control {
 
             for (let other = 0; other < last; other++) {
                 if (hiddenColumns.indexOf(other) < 0) {
-                    preceding += columnWidths[other] || columns[other].width || 160;
+                    preceding += columnWidths[other] || columnDefinitions[other].width;
                 }
             }
 
@@ -167,7 +211,7 @@ Control {
     readonly property real totalWidth: {
         let total = 0;
 
-        for (let index = 0; index < columns.length; index++) {
+        for (let index = 0; index < columnDefinitions.length; index++) {
             total += visibleWidth(index);
         }
 
@@ -179,8 +223,8 @@ Control {
             return "";
         }
 
-        return columns.map(function(column) {
-            const value = row[column.detailKey || column.key];
+        return columnDefinitions.map(function(column) {
+            const value = row[column.detailKey];
             return column.label + ": " + (value === undefined || value === null ? "" : String(value));
         }).join("\n");
     }
@@ -240,9 +284,40 @@ Control {
         list.positionViewAtIndex(index, ListView.Contain);
     }
 
+    function openColumnMenu() {
+        // The fixed header remains an anchor even when all data columns are
+        // hidden. Focus the first usable entry so Space can restore a column.
+        columnMenu.popup(root, 0, root.headerHeight);
+
+        for (let index = 0; index < columnMenu.count; index++) {
+            const item = columnMenu.itemAt(index);
+
+            if (item && item.visible && item.enabled) {
+                columnMenu.currentIndex = index;
+                item.forceActiveFocus();
+                break;
+            }
+        }
+    }
+
     function handleKey(event) {
         const page = Math.max(1, Math.floor(list.height / rowHeight));
         let target = currentIndex;
+
+        if (event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && event.modifiers === Qt.ShiftModifier)) {
+            openColumnMenu();
+            event.accepted = true;
+            return;
+        }
+
+        if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+            // Match the main tables' horizontal step without changing which
+            // immutable row Enter, Space or the details panel will act upon.
+            scrollHorizontally((event.key === Qt.Key_Left ? -1 : 1) * rowHeight * 3, 0);
+            event.accepted = true;
+            return;
+        }
 
         if (event.key === Qt.Key_Home) {
             target = 0;
@@ -257,7 +332,7 @@ Control {
         } else if (event.key === Qt.Key_PageDown) {
             target = Math.min(displayRows.length - 1, target + page);
         } else if (event.key === Qt.Key_Space && currentRow) {
-            const column = columns.find(function(item) { return item.checkable === true; });
+            const column = columnDefinitions.find(function(item) { return item.checkable === true; });
 
             if (!column) {
                 return;
@@ -345,7 +420,7 @@ Control {
                     height: parent.height
 
                     Repeater {
-                        model: root.columns
+                        model: root.columnDefinitions
 
                         delegate: Button {
                             id: heading
@@ -503,7 +578,7 @@ Control {
                         anchors.fill: parent
 
                         Repeater {
-                            model: root.columns
+                            model: root.columnDefinitions
 
                             delegate: Item {
                                 id: cell
@@ -601,7 +676,7 @@ Control {
         id: columnMenu
 
         Instantiator {
-            model: root.columns
+            model: root.columnDefinitions
 
             delegate: MenuItem {
                 required property var modelData

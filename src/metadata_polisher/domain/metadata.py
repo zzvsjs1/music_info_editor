@@ -148,5 +148,7 @@ class MetadataChange:
     """One semantic old/new field change after review."""
 
     field: MetadataField
-    old_value: object
-    new_value: object
+    # Keep reviewed values inside the semantic vocabulary. Format adapters still
+    # validate each field's particular representation before changing any tags.
+    old_value: FieldValue | None
+    new_value: FieldValue | None

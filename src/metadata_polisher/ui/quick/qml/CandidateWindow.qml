@@ -44,6 +44,37 @@ ApplicationWindow {
             wrapMode: Text.WordWrap
         }
 
+        // Candidate results belong to the captured local album. This copyable
+        // context stays independent of the main window's changing selection;
+        // long paths scroll within the header instead of displacing actions.
+        AppScrollView {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(72, localContext.implicitHeight)
+            Layout.maximumHeight: 72
+            contentWidth: availableWidth
+            clip: true
+            padding: 0
+            background: null
+
+            TextArea {
+                id: localContext
+                objectName: "candidateLocalContext"
+                text: lookup.candidateLocalContext
+                readOnly: true
+                selectByMouse: true
+                wrapMode: TextEdit.WrapAnywhere
+                textFormat: TextEdit.PlainText
+                Accessible.name: "Local album receiving this release"
+                padding: 0
+                background: null
+            }
+        }
+
+        ErrorPanel {
+            objectName: "candidateSelectionNotice"
+            text: lookup.candidateSelectionNotice
+        }
+
         // Sorting and column preferences affect presentation only. Every action
         // carries the complete release-and-medium identity back to the facade.
         RowTable {

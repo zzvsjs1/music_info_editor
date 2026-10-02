@@ -107,6 +107,16 @@ def _issue_from_error(
     )
 
 
+@dataclass
+class _TransactionProgress:
+    """Current disk state shared by phase helpers and terminal recovery."""
+
+    final_path: Path
+    stage: FileTransactionStage = FileTransactionStage.NOT_STARTED
+    temporary_path: Path | None = None
+    completed_backup_path: Path | None = None
+
+
 class TransactionalFileWriter:
     """Apply one validated ChangeSet without modifying its source pre-commit."""
 
@@ -126,10 +136,7 @@ class TransactionalFileWriter:
         # or creating files. The writer consumes a validated per-file decision.
         self._validate_request(source, changes, backup)
         operation_id = backup.operation_id
-        stage = FileTransactionStage.NOT_STARTED
-        temporary_path: Path | None = None
-        completed_backup_path: Path | None = None
-        final_path = source.path
+        progress = _TransactionProgress(final_path=source.path)
         events.emit(FileStarted(operation_id, source.file_id, source.path))
 
         try:
@@ -141,28 +148,30 @@ class TransactionalFileWriter:
             self._check_source_version(source)
 
             if backup.enabled:
-                stage = FileTransactionStage.BACKING_UP
-                self._emit_stage(events, operation_id, source, stage)
+                progress.stage = FileTransactionStage.BACKING_UP
+                self._emit_stage(events, operation_id, source, progress.stage)
                 self._check_source_version(source)
                 backup_result = self._back_up(source.path, backup)
 
                 if isinstance(backup_result, Issue):
-                    return self._failed(events, operation_id, source, final_path, stage, (backup_result,))
+                    return self._failed(
+                        events, operation_id, source, progress.final_path, progress.stage, (backup_result,),
+                    )
 
                 # Record completion before observing cancellation. BACKING_UP is
                 # also the last stage when cancellation follows a successful copy.
-                completed_backup_path = backup_result
+                progress.completed_backup_path = backup_result
                 cancellation.raise_if_cancelled()
 
-            stage = FileTransactionStage.COPYING_TEMPORARY
-            self._emit_stage(events, operation_id, source, stage)
+            progress.stage = FileTransactionStage.COPYING_TEMPORARY
+            self._emit_stage(events, operation_id, source, progress.stage)
             self._check_source_version(source)
 
             try:
-                temporary_path = self._filesystem.create_temporary_sibling(source.path)
-                self._filesystem.copy_file(source.path, temporary_path, overwrite=True)
+                progress.temporary_path = self._filesystem.create_temporary_sibling(source.path)
+                self._filesystem.copy_file(source.path, progress.temporary_path, overwrite=True)
             except OSError as error:
-                cleanup_issues = self._remove_if_present(temporary_path)
+                cleanup_issues = self._remove_if_present(progress.temporary_path)
                 issues = (
                     _issue_from_error(
                         MediaErrorCode.FILE_COPY_FAILED,
@@ -172,7 +181,10 @@ class TransactionalFileWriter:
                     *cleanup_issues,
                 )
 
-                return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
+                return self._failed(
+                    events, operation_id, source, progress.final_path, progress.stage,
+                    issues, progress.completed_backup_path,
+                )
 
             # A concurrent edit during copying also invalidates the reviewed
             # baseline, even if the private copy itself can still be verified.
@@ -182,15 +194,18 @@ class TransactionalFileWriter:
             # A rename-only transaction still copies and verifies the media,
             # but must never ask the adapter to create, rewrite or upgrade tags.
             if changes.metadata_changes:
-                stage = FileTransactionStage.WRITING_METADATA
-                self._emit_stage(events, operation_id, source, stage)
+                progress.stage = FileTransactionStage.WRITING_METADATA
+                self._emit_stage(events, operation_id, source, progress.stage)
 
                 try:
-                    adapter.write_changes(temporary_path, changes.metadata_changes)
+                    adapter.write_changes(progress.temporary_path, changes.metadata_changes)
                 except MediaFormatError as error:
-                    issues = (error.issue, *self._remove_if_present(temporary_path))
+                    issues = (error.issue, *self._remove_if_present(progress.temporary_path))
 
-                    return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
+                    return self._failed(
+                        events, operation_id, source, progress.final_path, progress.stage,
+                        issues, progress.completed_backup_path,
+                    )
                 except Exception as error:
                     issues = (
                         _issue_from_error(
@@ -198,162 +213,68 @@ class TransactionalFileWriter:
                             "Could not write metadata to the temporary copy.",
                             error,
                         ),
-                        *self._remove_if_present(temporary_path),
+                        *self._remove_if_present(progress.temporary_path),
                     )
 
-                    return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
+                    return self._failed(
+                        events, operation_id, source, progress.final_path, progress.stage,
+                        issues, progress.completed_backup_path,
+                    )
 
                 cancellation.raise_if_cancelled()
 
-            stage = FileTransactionStage.VERIFYING_TEMPORARY
-            self._emit_stage(events, operation_id, source, stage)
+            progress.stage = FileTransactionStage.VERIFYING_TEMPORARY
+            self._emit_stage(events, operation_id, source, progress.stage)
             # Reopen the sibling and compare reviewed fields and stream facts
             # before the first operation that can replace or publish user media.
-            verification = self._verify(adapter, temporary_path, source, changes)
+            verification = self._verify(adapter, progress.temporary_path, source, changes)
 
             if verification:
-                issues = (*verification, *self._remove_if_present(temporary_path))
+                issues = (*verification, *self._remove_if_present(progress.temporary_path))
 
-                return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
+                return self._failed(
+                    events, operation_id, source, progress.final_path, progress.stage,
+                    issues, progress.completed_backup_path,
+                )
 
             cancellation.raise_if_cancelled()
 
             if changes.rename_change is None:
-                stage = FileTransactionStage.COMMITTING
-                self._emit_stage(events, operation_id, source, stage)
-                self._check_source_version(source)
+                return self._commit_same_path(source, progress, operation_id, events)
 
-                try:
-                    self._filesystem.replace_file(temporary_path, source.path)
-                    temporary_path = None
-                except OSError as error:
-                    issues = (
-                        _issue_from_error(
-                            MediaErrorCode.COMMIT_FAILED,
-                            "Could not atomically replace the original media file.",
-                            error,
-                        ),
-                        *self._remove_if_present(temporary_path),
-                    )
-
-                    return self._failed(events, operation_id, source, final_path, stage, issues, completed_backup_path)
-
-                # Cancellation is deliberately not observed after commit begins.
-                # The current file must reach a safe terminal state.
-                return self._succeeded(events, operation_id, source, source.path, completed_backup_path)
-
-            destination = changes.rename_change.new_path
-            stage = FileTransactionStage.RENAMING
-            self._emit_stage(events, operation_id, source, stage)
-            self._check_source_version(source)
-
-            try:
-                # Publish without replacement while retaining the original. A
-                # destination appearing after preflight must cause a safe failure.
-                self._filesystem.move_file_no_replace(temporary_path, destination)
-                temporary_path = None
-                final_path = destination
-            except FileExistsError as error:
-                issues = (
-                    _issue_from_error(
-                        MediaErrorCode.DESTINATION_EXISTS,
-                        "The requested rename destination already exists.",
-                        error,
-                    ),
-                    *self._remove_if_present(temporary_path),
-                )
-
-                return self._failed(events, operation_id, source, source.path, stage, issues, completed_backup_path)
-            except OSError as error:
-                issues = (
-                    _issue_from_error(
-                        MediaErrorCode.RENAME_FAILED,
-                        "Could not publish the verified renamed media file.",
-                        error,
-                    ),
-                    *self._remove_if_present(temporary_path),
-                )
-
-                return self._failed(events, operation_id, source, source.path, stage, issues, completed_backup_path)
-
-            stage = FileTransactionStage.VERIFYING_FINAL
-            self._emit_stage(events, operation_id, source, stage)
-            final_verification = self._verify(adapter, destination, source, changes)
-
-            # A rename has a second verification boundary at the published path.
-            # Remove a failed output, preserving the original as the valid copy.
-            if final_verification:
-                cleanup_issues = self._remove_if_present(destination)
-                final_path = destination if cleanup_issues else source.path
-
-                return self._failed(
-                    events,
-                    operation_id,
-                    source,
-                    final_path,
-                    stage,
-                    (*final_verification, *cleanup_issues),
-                    completed_backup_path,
-                )
-
-            stage = FileTransactionStage.CLEANING_ORIGINAL
-            self._emit_stage(events, operation_id, source, stage)
-            self._check_source_version(source)
-
-            # Delete the original only after the renamed output verifies. If
-            # cleanup fails, retain both files and report that exact partial state.
-            try:
-                self._filesystem.remove_file(source.path)
-            except OSError as error:
-                issue = _issue_from_error(
-                    MediaErrorCode.CLEANUP_FAILED,
-                    "The renamed file was verified, but the original could not be removed.",
-                    error,
-                )
-
-                return self._failed(
-                    events,
-                    operation_id,
-                    source,
-                    destination,
-                    stage,
-                    (issue,),
-                    completed_backup_path,
-                )
-
-            return self._succeeded(events, operation_id, source, destination, completed_backup_path)
+            return self._publish_rename(source, changes, adapter, progress, operation_id, events)
         except MediaFormatError as error:
             # A source conflict never grants permission to overwrite or delete
             # the external edit. A published rename may also have been changed
             # externally, so retain that path for recovery and require a rescan.
-            cleanup_issues = self._remove_if_present(temporary_path)
+            cleanup_issues = self._remove_if_present(progress.temporary_path)
 
             return self._failed(
-                events, operation_id, source, final_path, stage,
-                (error.issue, *cleanup_issues), completed_backup_path,
+                events, operation_id, source, progress.final_path, progress.stage,
+                (error.issue, *cleanup_issues), progress.completed_backup_path,
             )
         # Every cancellation check above occurs before publication. At those
         # points only the temporary sibling needs removal; the source is intact.
         except OperationCancelledError:
-            cleanup_issues = self._remove_if_present(temporary_path)
+            cleanup_issues = self._remove_if_present(progress.temporary_path)
 
             if cleanup_issues:
                 return self._failed(
                     events,
                     operation_id,
                     source,
-                    final_path,
-                    stage,
+                    progress.final_path,
+                    progress.stage,
                     cleanup_issues,
-                    completed_backup_path,
+                    progress.completed_backup_path,
                 )
 
             result = FileApplyResult(
                 source_path=source.path,
                 final_path=source.path,
                 status=FileApplyStatus.CANCELLED,
-                completed_stage=stage,
-                completed_backup_path=completed_backup_path,
+                completed_stage=progress.stage,
+                completed_backup_path=progress.completed_backup_path,
             )
             events.emit(
                 FileCompleted(
@@ -367,6 +288,141 @@ class TransactionalFileWriter:
             )
 
             return result
+
+    def _commit_same_path(
+        self,
+        source: LocalMediaFile,
+        progress: _TransactionProgress,
+        operation_id: str,
+        events: OperationEventSink,
+    ) -> FileApplyResult:
+        """Replace the source only after its temporary sibling has verified."""
+        assert progress.temporary_path is not None
+        progress.stage = FileTransactionStage.COMMITTING
+        self._emit_stage(events, operation_id, source, progress.stage)
+        self._check_source_version(source)
+
+        try:
+            self._filesystem.replace_file(progress.temporary_path, source.path)
+            progress.temporary_path = None
+        except OSError as error:
+            issues = (
+                _issue_from_error(
+                    MediaErrorCode.COMMIT_FAILED,
+                    "Could not atomically replace the original media file.",
+                    error,
+                ),
+                *self._remove_if_present(progress.temporary_path),
+            )
+
+            return self._failed(
+                events, operation_id, source, progress.final_path, progress.stage,
+                issues, progress.completed_backup_path,
+            )
+
+        # Cancellation is deliberately not observed after commit begins. The
+        # current file must reach a safe terminal state before the batch stops.
+        return self._succeeded(events, operation_id, source, source.path, progress.completed_backup_path)
+
+    def _publish_rename(
+        self,
+        source: LocalMediaFile,
+        changes: FileChangeSet,
+        adapter: MediaFormatAdapter,
+        progress: _TransactionProgress,
+        operation_id: str,
+        events: OperationEventSink,
+    ) -> FileApplyResult:
+        """Publish and verify a renamed copy before removing the original."""
+        assert changes.rename_change is not None
+        assert progress.temporary_path is not None
+        destination = changes.rename_change.new_path
+        progress.stage = FileTransactionStage.RENAMING
+        self._emit_stage(events, operation_id, source, progress.stage)
+        self._check_source_version(source)
+
+        try:
+            # Publish without replacement while retaining the original. A
+            # destination appearing after preflight must cause a safe failure.
+            self._filesystem.move_file_no_replace(progress.temporary_path, destination)
+            progress.temporary_path = None
+            progress.final_path = destination
+        except FileExistsError as error:
+            issues = (
+                _issue_from_error(
+                    MediaErrorCode.DESTINATION_EXISTS,
+                    "The requested rename destination already exists.",
+                    error,
+                ),
+                *self._remove_if_present(progress.temporary_path),
+            )
+
+            return self._failed(
+                events, operation_id, source, source.path, progress.stage,
+                issues, progress.completed_backup_path,
+            )
+        except OSError as error:
+            issues = (
+                _issue_from_error(
+                    MediaErrorCode.RENAME_FAILED,
+                    "Could not publish the verified renamed media file.",
+                    error,
+                ),
+                *self._remove_if_present(progress.temporary_path),
+            )
+
+            return self._failed(
+                events, operation_id, source, source.path, progress.stage,
+                issues, progress.completed_backup_path,
+            )
+
+        # The shared progress record now identifies the published copy. If a
+        # later source-version check fails, outer recovery must retain that
+        # output and report its path rather than treating it as a temporary file.
+        progress.stage = FileTransactionStage.VERIFYING_FINAL
+        self._emit_stage(events, operation_id, source, progress.stage)
+        final_verification = self._verify(adapter, destination, source, changes)
+
+        if final_verification:
+            cleanup_issues = self._remove_if_present(destination)
+            progress.final_path = destination if cleanup_issues else source.path
+
+            return self._failed(
+                events,
+                operation_id,
+                source,
+                progress.final_path,
+                progress.stage,
+                (*final_verification, *cleanup_issues),
+                progress.completed_backup_path,
+            )
+
+        progress.stage = FileTransactionStage.CLEANING_ORIGINAL
+        self._emit_stage(events, operation_id, source, progress.stage)
+        self._check_source_version(source)
+
+        # Delete the original only after the renamed output verifies. If cleanup
+        # fails, retain both copies and report that exact partial completion.
+        try:
+            self._filesystem.remove_file(source.path)
+        except OSError as error:
+            issue = _issue_from_error(
+                MediaErrorCode.CLEANUP_FAILED,
+                "The renamed file was verified, but the original could not be removed.",
+                error,
+            )
+
+            return self._failed(
+                events,
+                operation_id,
+                source,
+                destination,
+                progress.stage,
+                (issue,),
+                progress.completed_backup_path,
+            )
+
+        return self._succeeded(events, operation_id, source, destination, progress.completed_backup_path)
 
     @staticmethod
     def _check_source_version(source: LocalMediaFile) -> None:

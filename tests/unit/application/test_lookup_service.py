@@ -1326,6 +1326,8 @@ def test_explicit_selection_enriches_only_that_candidate_and_maps_its_medium() -
     assert provider.enrich_calls == [(basic_candidates["release-2"], context)]
     assert result.candidate_lookup is lookup
     assert result.selected_identity == ("provider", "provider", "release-2", 0)
+    assert result.selected_identity.release_id == "release-2"
+    assert result.selected_identity.medium_index == 0
     assert result.selected_candidate is not None
     assert result.selected_candidate.candidate is enriched_selected
     assert result.selected_candidate.candidate.media[0].tracks[0].composers == ("Composer",)
@@ -1334,6 +1336,16 @@ def test_explicit_selection_enriches_only_that_candidate_and_maps_its_medium() -
         group.files[0].file_id,
     )
     assert result.failures == ()
+
+    # Legacy callers can reconstruct a result with the original public tuple.
+    # Its named projection must not change equality or relax index validation.
+    legacy_result = replace(result, selected_identity=("provider", "provider", "release-2", 0))
+
+    assert legacy_result == result
+    assert legacy_result.selected_identity.release_identity == ("provider", "provider", "release-2")
+
+    with pytest.raises(TypeError, match="selected_identity"):
+        replace(result, selected_identity=("provider", "provider", "release-2", False))
 
     mismatched_mapping = replace(result.track_mapping, selected_medium_number=99)
 

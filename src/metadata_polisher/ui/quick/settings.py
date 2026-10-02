@@ -28,6 +28,7 @@ from metadata_polisher.rename.template import FilenameRenderPolicy, TemplateFiel
 from metadata_polisher.session.lookup_editing import refresh_inherited_language
 from metadata_polisher.session.review_editing import refresh_rename_previews
 from metadata_polisher.session.state import OperationKind, SessionState
+from metadata_polisher.ui.quick.settings_draft import SettingsDraft
 
 if TYPE_CHECKING:
     from metadata_polisher.ui.quick.backend import QuickBackend
@@ -56,6 +57,10 @@ to Changes to apply. Undo review changes pending decisions, not completed writes
 <p>Selected files means the highlighted tracks. Current group, Included files
 and All library files can contain tracks outside the visible table.
 Check the file and field counts before a batch action.</p>
+<p>Batch full-value details show each file's existing, proposed and final values
+with proposal sources. The final Apply summary identifies files by relative path;
+select a row to inspect its actual before-and-after changes. Open filename previews
+follow the current review and refresh as decisions change.</p>
 <h3>Table order</h3>
 <p>Click an album, file or secondary-table header to sort; click again to
 reverse direction. Files start in Disc, Track, then File order, using numeric
@@ -63,9 +68,13 @@ positions. A track without a disc number uses disc 1 for ordering; files without
 either number follow in filename order. Right-click a file header and choose
 Disc / track order to restore the default. Selection and inclusion stay with
 their files. Metadata review fields keep their fixed order.</p>
+<p>Short windows move secondary commands into More actions and the files' More menu.
+Narrow review tables show Field, Final and Status first; scroll for the original
+and proposed values or open Show full values.</p>
 <h3>Keyboard reference</h3>
 <p>Ctrl+O: choose folder<br>F5 or Enter in folder: rescan<br>
 Ctrl+A in tracks: select all displayed tracks<br>Ctrl+Shift+A: clear highlighting<br>
+Left / Right in a table: reveal columns<br>Menu or Shift+F10: column settings<br>
 Enter on a track or Ctrl+E: open review<br>F2 on a field: manual value<br>
 Alt+Left / Alt+Right: previous / next track<br>Ctrl+Z in review: undo review<br>
 Ctrl+L: find metadata for selected albums<br>Ctrl+Enter: Review &amp; Apply<br>
@@ -88,7 +97,7 @@ class QuickSettings(QObject):
         self._original = host.app_settings
         self._expected_state = host.session_state
         self._file_snapshot: bytes | None = None
-        self._draft: dict[str, str | int | bool | None] = {}
+        self._draft = SettingsDraft.from_settings(self._original)
         self._tools: dict[str, str] = {}
         self._username = ""
         self._password = ""
@@ -107,27 +116,12 @@ class QuickSettings(QObject):
         host.bridge.failed.connect(self._test_failed)
 
     def _load_draft(self, settings: AppSettings) -> None:
-        self._draft = {
-            "renameEnabled": settings.rename.enabled,
-            "template": settings.rename.template,
-            "trackDigits": settings.rename.minimum_track_digits,
-            "discDigits": settings.rename.minimum_disc_digits,
-            "preferredLanguage": settings.matching.preferred_language,
-            "providerId": settings.providers.selected_provider_id,
-            "networkMode": settings.network.mode,
-            "proxyHost": settings.network.proxy_host,
-            "proxyPort": settings.network.proxy_port,
-            "backupEnabled": settings.backup.enabled,
-            "backupDirectory": settings.backup.directory,
-            "reportsEnabled": settings.reports.enabled,
-            "reportsDirectory": settings.reports.directory,
-            "detailedTracing": settings.diagnostics.detailed_tracing,
-        }
+        self._draft = SettingsDraft.from_settings(settings)
         self._tools = dict(settings.external_tools)
 
     def _provider_options(self) -> list[dict[str, str | None]]:
         options = [{"id": item, "label": provider_label(item)} for item in ("musicbrainz_direct", "vgmdb", None)]
-        selected = cast(str | None, self._draft["providerId"])
+        selected = self._draft.provider_id
 
         if selected not in {"musicbrainz_direct", "vgmdb", None}:
             options.append({"id": selected, "label": "Unavailable stored provider"})
@@ -136,7 +130,7 @@ class QuickSettings(QObject):
 
     def _route_options(self) -> list[dict[str, str]]:
         options = [{"id": "direct", "label": "Direct"}, {"id": "manual_proxy", "label": "Manual HTTP proxy"}]
-        selected = str(self._draft["networkMode"])
+        selected = self._draft.network_mode
 
         if selected not in {"direct", "manual_proxy"}:
             options.append({"id": selected, "label": "Unavailable stored route"})
@@ -155,7 +149,7 @@ class QuickSettings(QObject):
     opened = Property(bool, lambda self: self._opened, notify=changed)
     # Qt requires the registered QVariantMap name for a native JavaScript map;
     # its Python annotation does not include this supported string overload.
-    draft = Property("QVariantMap", lambda self: dict(self._draft), notify=changed)  # type: ignore[arg-type]
+    draft = Property("QVariantMap", lambda self: self._draft.to_qml(), notify=changed)  # type: ignore[arg-type]
     tools = Property(
         list, lambda self: [{"name": name, "path": path} for name, path in sorted(self._tools.items())], notify=changed
     )
@@ -163,7 +157,7 @@ class QuickSettings(QObject):
     fieldErrors = Property("QVariantMap", lambda self: dict(self._field_errors), notify=changed)  # type: ignore[arg-type]
     providerOptions = Property(list, _provider_options, notify=changed)
     routeOptions = Property(list, _route_options, notify=changed)
-    providerSummary = Property(str, lambda self: provider_summary(self._draft["providerId"]), notify=changed)
+    providerSummary = Property(str, lambda self: provider_summary(self._draft.provider_id), notify=changed)
     routeDescription = Property(str, lambda self: describe_network_route(self._network()), notify=changed)
 
     # Credentials and connection-test receipts have a separate session lifetime
@@ -175,7 +169,7 @@ class QuickSettings(QObject):
     testRunning = Property(bool, lambda self: self._test_operation is not None, notify=changed)
     testEnabled = Property(
         bool,
-        lambda self: self._test_operation is None and self._draft["providerId"] in {"musicbrainz_direct", "vgmdb"},
+        lambda self: self._test_operation is None and self._draft.provider_id in {"musicbrainz_direct", "vgmdb"},
         notify=changed,
     )
 
@@ -219,17 +213,15 @@ class QuickSettings(QObject):
 
     @Slot(str, "QVariant")
     def setField(self, name: str, value: object) -> None:
-        if not self._can_change() or name not in self._draft:
+        if not self._can_change():
             return
 
-        expected = type(self._draft[name])
+        updated = self._draft.with_field(name, value)
 
-        valid = value is None or isinstance(value, str) if name == "providerId" else type(value) is expected
-
-        if not valid:
+        if updated is None:
             return
 
-        self._draft[name] = cast(str | int | bool | None, value)
+        self._draft = updated
 
         # Editing a field retires only its own validation result. Conditional
         # controls also recheck their dependent fields, so disabled preferences
@@ -257,7 +249,7 @@ class QuickSettings(QObject):
 
     @Slot(str)
     def validateField(self, name: str) -> None:
-        if not self._can_change() or name not in self._draft:
+        if not self._can_change() or name not in self._draft.to_qml():
             return
 
         errors = self._collect_field_errors()
@@ -301,7 +293,7 @@ class QuickSettings(QObject):
 
     def _network(self) -> NetworkSettings:
         return NetworkSettings(
-            str(self._draft["networkMode"]), str(self._draft["proxyHost"]), cast(int, self._draft["proxyPort"])
+            self._draft.network_mode, self._draft.proxy_host, self._draft.proxy_port
         )
 
     def _collect_field_errors(self) -> dict[str, str]:
@@ -309,21 +301,22 @@ class QuickSettings(QObject):
         errors: dict[str, str] = {}
 
         try:
-            parse_template(str(self._draft["template"]))
+            parse_template(self._draft.template)
         except (TypeError, ValueError) as error:
             errors["template"] = str(error)
 
         # Validate each padding field with a valid opposite field. Otherwise
         # the first exception would hide another error in the same submission.
-        for field, track in (("trackDigits", True), ("discDigits", False)):
-            value = cast(int, self._draft[field])
-
+        for field, value, track in (
+            ("trackDigits", self._draft.track_digits, True),
+            ("discDigits", self._draft.disc_digits, False),
+        ):
             try:
                 FilenameRenderPolicy(value if track else 1, 1 if track else value)
             except (TypeError, ValueError) as error:
                 errors[field] = str(error)
 
-        if not str(self._draft["preferredLanguage"]).strip():
+        if not self._draft.preferred_language.strip():
             errors["preferredLanguage"] = "Enter a preferred language, or auto for automatic selection."
 
         network = self._network()
@@ -346,31 +339,29 @@ class QuickSettings(QObject):
             except (TypeError, ValueError) as error:
                 errors["networkMode"] = str(error)
 
-        if self._draft["backupEnabled"] and not str(self._draft["backupDirectory"]).strip():
+        if self._draft.backup_enabled and not self._draft.backup_directory.strip():
             errors["backupDirectory"] = "Choose a backup directory when permanent backups are enabled."
 
         return errors
 
     def _settings(self) -> AppSettings:
-        template = str(self._draft["template"])
-        backup_directory = str(self._draft["backupDirectory"])
-        language = str(self._draft["preferredLanguage"])
+        draft = self._draft
         network = self._network()
 
         return replace(
             self._original,
             rename=RenameSettings(
-                bool(self._draft["renameEnabled"]),
-                template,
-                cast(int, self._draft["trackDigits"]),
-                cast(int, self._draft["discDigits"]),
+                draft.rename_enabled,
+                draft.template,
+                draft.track_digits,
+                draft.disc_digits,
             ),
-            matching=MatchingSettings(language),
-            providers=ProvidersSettings(cast(str | None, self._draft["providerId"])),
+            matching=MatchingSettings(draft.preferred_language),
+            providers=ProvidersSettings(draft.provider_id),
             network=network,
-            backup=BackupSettings(bool(self._draft["backupEnabled"]), backup_directory),
-            reports=ReportsSettings(bool(self._draft["reportsEnabled"]), str(self._draft["reportsDirectory"])),
-            diagnostics=DiagnosticsSettings(bool(self._draft["detailedTracing"])),
+            backup=BackupSettings(draft.backup_enabled, draft.backup_directory),
+            reports=ReportsSettings(draft.reports_enabled, draft.reports_directory),
+            diagnostics=DiagnosticsSettings(draft.detailed_tracing),
             external_tools=self._tools,
         )
 
@@ -463,7 +454,7 @@ class QuickSettings(QObject):
 
     @Slot(result=bool)
     def testProvider(self) -> bool:
-        selected = self._draft["providerId"]
+        selected = self._draft.provider_id
 
         if (
             not self._can_change()
