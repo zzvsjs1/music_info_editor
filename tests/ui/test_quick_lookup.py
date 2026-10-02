@@ -15,6 +15,7 @@ from metadata_polisher.session.state import GroupSelection, GroupState, SessionS
 from metadata_polisher.ui.qt_bridge import QtOperationBridge
 from metadata_polisher.ui.quick.lookup import QuickLookup
 from tests.ui.helpers import ControlledExecutor
+from tests.ui.rendering import window_image_scale
 from tests.unit.application.test_lookup_service import (
     LookupFakeProvider,
     make_candidate,
@@ -353,24 +354,23 @@ def test_native_contact_top_border_is_continuous(musicbrainz_contact_scene, qtbo
     qtbot.wait(100)
     assert field.hasActiveFocus() == (field_state != "normal")
     image = contact.grabWindow()
-    assert not image.isNull()
-    scale = image.devicePixelRatio()
+    scale_x, scale_y = window_image_scale(contact, image)
     origin = field.mapToScene(QPointF())
-    y = ceil(origin.y() * scale)
+    y = ceil(origin.y() * scale_y)
 
     # Stay on the straight top edge, outside both rounded corners. At 125%
     # the native frame loses a strip near its right corner despite matching
     # the input's size. Compare actual painted pixels rather than item bounds.
     def edge_colour(fraction):
-        return image.pixelColor(round((origin.x() + field.width() * fraction) * scale), y)
+        return image.pixelColor(round((origin.x() + field.width() * fraction) * scale_x), y)
 
     expected = edge_colour(0.5)
-    interior = image.pixelColor(round((origin.x() + field.width() / 2) * scale),
-                                round((origin.y() + field.height() / 2) * scale))
+    interior = image.pixelColor(round((origin.x() + field.width() / 2) * scale_x),
+                                round((origin.y() + field.height() / 2) * scale_y))
     assert expected != interior, "The top border must be painted."
 
     for fraction in (0.1, 0.25, 0.75, 0.9, 0.94):
-        assert edge_colour(fraction) == expected, f"Broken top border at {fraction:.0%} ({scale:g}x DPI)"
+        assert edge_colour(fraction) == expected, f"Broken top border at {fraction:.0%} ({scale_x:g}x DPI)"
 
 
 def test_musicbrainz_contact_error_is_inline_and_clears_on_edit(musicbrainz_contact_scene, qtbot):

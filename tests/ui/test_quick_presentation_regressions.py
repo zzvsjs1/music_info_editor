@@ -13,6 +13,7 @@ from metadata_polisher.infrastructure.settings import AppSettings, UiSettings, l
 from metadata_polisher.ui.quick.application import create_quick_engine
 from metadata_polisher.ui.quick.backend import QuickBackend
 from tests.ui.helpers import ControlledExecutor, changed_local_session
+from tests.ui.rendering import window_image_scale
 
 
 @pytest.fixture
@@ -226,14 +227,15 @@ def test_native_review_scrollbar_has_no_white_edge(presentation_scene, qtbot):
     assert bar.property("size") < 1
 
     image = review.grabWindow()
-    scale = image.devicePixelRatio()
+    scale_x, scale_y = window_image_scale(review, image)
     origin = bar.mapToScene(QPointF())
-    y = round((origin.y() + bar.height() / 2) * scale)
-    edge = round(origin.x() * scale)
-    track = round((origin.x() + bar.width() * 0.2) * scale)
+    y = round((origin.y() + bar.height() / 2) * scale_y)
+    edge = round(origin.x() * scale_x)
+    track = round((origin.x() + bar.width() * 0.2) * scale_x)
 
     # The white line in the report belongs to this outer ScrollView. Sample
     # outside the centred thumb so a legitimate thumb edge is not a failure.
+    assert image.pixelColor(track, y) == bar.property("background").property("color")
     assert image.pixelColor(edge, y) == image.pixelColor(track, y)
 
     start_position = bar.property("position")

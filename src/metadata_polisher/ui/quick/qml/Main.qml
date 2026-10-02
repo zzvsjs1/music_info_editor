@@ -502,7 +502,20 @@ ApplicationWindow {
                     emptyText: ""
                     onRowSelected: function(id, toggle, extend) { backend.selectFileExtended(id, toggle, extend); }
                     onCellActivated: function(id, value, column) {
-                        if (column !== 0) {
+                        if (column === 0) {
+                            return;
+                        }
+
+                        // Activation must identify its own target: after scrolling,
+                        // a preceding click may not have updated the selection.
+                        // Retain a wider selection when the hit file belongs to it.
+                        if (backend.selectedFileIds.indexOf(id) < 0) {
+                            backend.selectFileExtended(id, false, false);
+                        }
+
+                        // A stale identity can be rejected by the backend. In that
+                        // case, do not fall back to opening the previous file.
+                        if (backend.selectedFileIds.indexOf(id) >= 0) {
                             window.openSelectedReview();
                         }
                     }

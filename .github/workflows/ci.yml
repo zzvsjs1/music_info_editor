@@ -44,6 +44,7 @@ jobs:
           python -m pytest -q
           tests/ui/test_quick_presentation_regressions.py::test_native_review_scrollbar_has_no_white_edge
           tests/ui/test_quick_table_interaction.py::test_native_horizontal_scrollbar_has_a_continuous_track
+          tests/ui/test_quick_lookup.py::test_native_contact_top_border_is_continuous
           tests/ui/test_quick_process_lifecycle.py
       - name: Build Python source and wheel distributions
         run: python -m build

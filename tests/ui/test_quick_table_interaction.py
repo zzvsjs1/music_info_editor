@@ -21,6 +21,8 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtTest import QSignalSpy, QTest
 
+from tests.ui.rendering import window_image_scale
+
 
 class TableRows(QAbstractTableModel):
     """Supply enough synthetic rows to require both scrollbar directions."""
@@ -340,18 +342,19 @@ def test_native_horizontal_scrollbar_has_a_continuous_track(table_scene, qtbot, 
     assert bar.isVisible() and bar.property("size") < 0.8
 
     image = window.grabWindow()
-    scale = image.devicePixelRatio()
+    scale_x, scale_y = window_image_scale(window, image)
     origin = bar.mapToScene(QPointF())
 
     def colour(x_fraction, y_fraction):
-        x = round((origin.x() + bar.width() * x_fraction) * scale)
-        y = round((origin.y() + bar.height() * y_fraction) * scale)
+        x = round((origin.x() + bar.width() * x_fraction) * scale_x)
+        y = round((origin.y() + bar.height() * y_fraction) * scale_y)
         return image.pixelColor(x, y)
 
-    # The native groove's first device-pixel row currently contains white
-    # content pixels under its left portion and grey track pixels on the right.
-    # Compare that boundary with the empty track beyond the thumb.
+    # The original groove defect exposed white content pixels at its top edge.
+    # Compare that boundary with the empty track beyond the thumb, and verify
+    # the reference itself lands on the track rather than blank table content.
     track = colour(0.9, 0.5)
+    assert track == bar.property("background").property("color")
     assert colour(0.1, 0.001) == track
     assert colour(0.9, 0.001) == track
 
