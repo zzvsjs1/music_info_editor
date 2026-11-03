@@ -49,7 +49,7 @@ def classify_group(group: GroupState) -> GroupPresentationStatus:
     if group.requires_rescan:
         return GroupPresentationStatus.RESCAN_REQUIRED
 
-    if group.selection_failure is not None:
+    if group.selection_failure is not None or group.search_failure is not None:
         return GroupPresentationStatus.METADATA_ERROR
 
     if any(source.read_result.issues for source in group.group.files) or any(

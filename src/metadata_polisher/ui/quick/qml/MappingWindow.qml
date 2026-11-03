@@ -132,7 +132,10 @@ ApplicationWindow {
         }
 
         ErrorPanel {
-            text: lookup.mappingEvidence + (lookup.mappingError ? "\n" + lookup.mappingError : "")
+            objectName: "mappingFeedback"
+            // On a rejected assignment, show the reason at the top of the
+            // panel. A long evidence record previously hid it below the fold.
+            text: lookup.mappingError || lookup.mappingEvidence
         }
 
         RowLayout {
@@ -141,7 +144,7 @@ ApplicationWindow {
 
             ActionButton {
                 objectName: "quickMappingAccept"
-                text: "OK"
+                text: "Use mapping"
                 onClicked: lookup.commitMapping()
             }
 

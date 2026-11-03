@@ -1,12 +1,15 @@
 """Keep the loaded library and useful review content visible in compact windows."""
 
+from dataclasses import replace
+
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QPointF, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtQuick import QQuickItem, QQuickWindow
 from PySide6.QtTest import QTest
 
-from metadata_polisher.session.state import OperationKind
+from metadata_polisher.infrastructure.settings import GeneralSettings
+from metadata_polisher.session.state import OperationKind, SessionState
 from metadata_polisher.ui.quick.application import create_quick_engine
 from metadata_polisher.ui.quick.backend import QuickBackend
 from tests.ui.helpers import ControlledExecutor, changed_local_session
@@ -83,6 +86,24 @@ def test_unscanned_path_is_explicitly_distinguished_from_loaded_library(audit_sc
     assert backend.rootPath in context.property("text")
     assert "Loaded library" in context.property("text")
     assert "another-library" not in context.property("text")
+
+
+def test_scan_button_distinguishes_a_suggestion_from_a_loaded_folder(audit_scene):
+    window, backend = audit_scene
+    path = item(window, "folderPath")
+    scan = item(window, "scanButton")
+    assert scan.property("text") == "Rescan"
+    path.setProperty("text", "another-library")
+    assert scan.property("text") == "Scan"
+
+    backend.app_settings = replace(backend.app_settings, general=GeneralSettings("remembered-library"))
+    backend.set_state(SessionState(root=None))
+    assert path.property("text") == "remembered-library"
+    assert scan.property("text") == "Scan"
+    path.setProperty("text", "another-library")
+    assert not item(window, "loadedLibraryLabel").isVisible()
+    path.setProperty("text", "  ")
+    assert not scan.isEnabled()
 
 
 def test_compact_main_retains_four_readable_rows_and_access_to_secondary_actions(audit_scene, qtbot):
@@ -173,11 +194,14 @@ def test_compact_window_does_not_open_a_submenu_without_user_input(audit_scene):
 def test_diagnostics_remains_available_during_an_operation_in_both_layouts(audit_scene, qtbot, height):
     window, backend = audit_scene
     window.resize(840, height)
+    progress = item(window, "operationStageButton")
+    assert not progress.isEnabled()
     assert backend.submit_operation(
         "diagnostics-access", OperationKind.PROVIDER_TEST, (), lambda *_: None, lambda state, _result: state,
     )
     qtbot.wait(60)
     assert backend.busy
+    assert progress.isEnabled()
 
     if window.property("compactHeight"):
         assert QMetaObject.invokeMethod(item(window, "groupToolsButton"), "clicked")

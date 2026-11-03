@@ -15,21 +15,29 @@ from metadata_polisher.execution.events import OperationStageChanged
 from metadata_polisher.providers.base import RequestContext
 
 _ERROR_MESSAGES: dict[ProviderErrorCode, str] = {
-    ProviderErrorCode.NETWORK_TIMEOUT: "The metadata provider request timed out.",
-    ProviderErrorCode.NETWORK_ERROR: "The metadata provider could not be reached.",
+    ProviderErrorCode.NETWORK_TIMEOUT: "The request timed out. Try again later.",
+    ProviderErrorCode.NETWORK_ERROR: "The request failed. Check your connection and try again.",
     ProviderErrorCode.PROXY_CONNECTION_FAILED: (
-        "The configured HTTP proxy could not complete the connection. No direct fallback was attempted."
+        "The app could not connect through the proxy. Check the proxy host and port in Settings."
     ),
-    ProviderErrorCode.PROXY_AUTHENTICATION_REQUIRED: "The HTTP proxy requires valid session credentials.",
-    ProviderErrorCode.TLS_VERIFICATION_FAILED: "The external service's HTTPS certificate could not be verified.",
-    ProviderErrorCode.RATE_LIMITED: "The metadata provider rate limit was reached.",
-    ProviderErrorCode.SERVICE_UNAVAILABLE: "The metadata provider is temporarily unavailable.",
-    ProviderErrorCode.AUTHENTICATION_REQUIRED: "The metadata provider requires authentication.",
+    ProviderErrorCode.PROXY_AUTHENTICATION_REQUIRED: (
+        "The proxy requires a login. Check the proxy username and password in Settings."
+    ),
+    ProviderErrorCode.TLS_VERIFICATION_FAILED: (
+        "The app could not verify the HTTPS certificate. Check your system clock and trusted certificates."
+    ),
+    ProviderErrorCode.RATE_LIMITED: "The provider's request limit was reached. Wait before trying again.",
+    ProviderErrorCode.SERVICE_UNAVAILABLE: "The provider returned a server error. Try again later.",
+    ProviderErrorCode.AUTHENTICATION_REQUIRED: (
+        "The provider requires authentication. Choose another provider in Settings."
+    ),
     ProviderErrorCode.ACCESS_DENIED: (
-        "The selected metadata provider blocked this app's request. No other provider was contacted."
+        "The provider blocked this request. Try again later or choose another provider in Settings."
     ),
-    ProviderErrorCode.INVALID_RESPONSE: "The metadata provider returned an invalid response.",
-    ProviderErrorCode.NOT_FOUND: "The requested metadata provider record was not found.",
+    ProviderErrorCode.INVALID_RESPONSE: (
+        "The app could not read the provider's response. Try again later or choose another provider in Settings."
+    ),
+    ProviderErrorCode.NOT_FOUND: "The provider could not find the requested page. Try another search.",
 }
 
 

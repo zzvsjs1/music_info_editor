@@ -298,6 +298,8 @@ def test_mapping_has_separate_assignment_and_evidence_columns_and_cancel_discard
         assert not lookup.assignTrack(second.file_id, 0)
         assert lookup.mappingRows == accepted_rows
         assert lookup.mappingError
+        feedback = window.findChild(QQuickItem, "mappingFeedback")
+        assert feedback.property("text") == lookup.mappingError
         assert backend.session_state is captured
         lookup.cancelMapping()
         assert backend.session_state is captured

@@ -171,13 +171,64 @@ def _manual_window(scene, qtbot, field):
     return editor, interface
 
 
+def test_final_activation_targets_the_hit_field_without_a_prior_click(scene, qtbot):
+    main, interface = scene
+    interface.selectFile("first", False)
+    interface.selectField("title")
+    interface.openReview()
+    review = main.findChild(QQuickWindow, "metadataReviewWindow")
+    table = review.findChild(QQuickItem, "reviewTable")
+    original = interface.session_state
+
+    table.cellActivated.emit("missing-field", "", 4)
+    assert not interface.editing
+    table.cellActivated.emit("date", "", 4)
+    qtbot.waitUntil(lambda: interface.editing)
+    assert interface.selectedFields == ["date"]
+    assert interface.editLabel == "Date"
+    assert interface.session_state is original
+    assert not interface.executor.pending
+
+
+@pytest.mark.parametrize("activation", ["pointer", "keyboard"])
+def test_read_only_field_activation_opens_copyable_details(scene, qtbot, activation):
+    main, interface = scene
+    interface.selectFile("first", False)
+    interface.selectField("title")
+    interface.openReview()
+    review = main.findChild(QQuickWindow, "metadataReviewWindow")
+    table = review.findChild(QQuickItem, "reviewTable")
+    review.requestActivate()
+    assert QTest.qWaitForWindowActive(review, 2000)
+    original = interface.session_state
+
+    if activation == "pointer":
+        table.cellActivated.emit("title", "First title", 2)
+    else:
+        table.forceActiveFocus()
+        qtbot.waitUntil(table.hasActiveFocus)
+        QTest.keyClick(review, Qt.Key.Key_Return)
+
+    details = review.findChild(QQuickItem, "fullReviewValue")
+    assert details is not None
+    qtbot.waitUntil(details.hasActiveFocus)
+    assert "First title" in details.property("text")
+    assert details.property("readOnly") and details.property("selectByMouse")
+    assert not interface.editing and interface.session_state is original
+    assert not interface.includedFileIds and not interface.executor.pending
+    QTest.keyClick(review, Qt.Key.Key_Escape)
+    qtbot.waitUntil(table.hasActiveFocus)
+    assert not details.isVisible()
+    assert review.isVisible()
+
+
 def test_manual_text_editor_is_compact_with_standard_cancel_semantics(scene, qtbot):
     editor, interface = _manual_window(scene, qtbot, "date")
-    assert editor.title() == "Manual value: date"
+    assert editor.title() == "Edit Date"
     assert editor.modality() == Qt.WindowModality.WindowModal
     assert editor.width() <= 520
     assert editor.height() <= 340
-    assert editor.findChild(QQuickItem, "saveEditButton").property("text") == "OK"
+    assert editor.findChild(QQuickItem, "saveEditButton").property("text") == "Use value"
 
     original = interface.session_state
     QTest.keyClick(editor, Qt.Key.Key_Escape)
@@ -196,13 +247,15 @@ def test_position_editor_uses_independent_number_and_total_controls(scene, qtbot
     assert number.property("value") == 2
     assert total.property("value") == 12
 
-    # The Widgets editor treats zero as Missing, independently for each part.
-    # Saving number Missing must not silently retain the previous number two.
+    # A zero component leaves that part of the source position intact.
     number.setProperty("value", 0)
+    assert number.property("displayText") == "Keep existing"
     total.setProperty("value", 15)
     click_item(editor, "saveEditButton")
     qtbot.waitUntil(lambda: not interface.editing)
     assert field_review(interface.session_state, MetadataField.TRACK).manual_value == Position(None, 15)
+    changes = interface.session_state.groups[0].reviewed_files[0].change_set
+    assert changes.final_metadata.track == Position(2, 15)
 
 
 @pytest.mark.parametrize("accept_with_key", [True, False])
@@ -252,6 +305,32 @@ def test_common_value_editor_names_all_captured_fields_and_files(backend):
     assert "Title" in backend.editTitle
     assert "Album" in backend.editTitle
     assert "2 files" in backend.editTitle
+
+
+@pytest.mark.parametrize("album", ["First title", "Other album"])
+def test_common_value_editor_seeds_only_a_value_shared_by_all_fields(backend, album):
+    backend.selectFile("first", False)
+    backend.selectField("album")
+    assert backend.beginEdit() and backend.commitEdit(album)
+    backend.selectFieldExtended("title", True, False)
+    snapshot = backend.session_state
+
+    assert backend.beginEdit()
+    assert backend.editValue == ("First title" if album == "First title" else "")
+    assert backend.session_state is snapshot
+    assert not backend.includedFileIds and not backend.executor.pending
+
+
+def test_manual_editor_focuses_and_selects_the_current_value(scene, qtbot):
+    editor, interface = _manual_window(scene, qtbot, "title")
+    value = editor.findChild(QQuickItem, "manualEditValue")
+    assert value.property("selectedText") == "First title"
+    QTest.keyClick(editor, Qt.Key.Key_Z)
+    assert value.property("text") == "z"
+    QTest.keyClick(editor, Qt.Key.Key_Enter, Qt.KeyboardModifier.ControlModifier)
+    qtbot.waitUntil(lambda: not interface.editing)
+    assert field_review(interface.session_state, MetadataField.TITLE).manual_value == "z"
+    assert not interface.includedFileIds and not interface.executor.pending
 
 
 def test_long_progress_filename_keeps_cancellation_visible(scene, qtbot):

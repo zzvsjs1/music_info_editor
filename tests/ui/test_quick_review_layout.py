@@ -72,7 +72,7 @@ def test_expanding_details_does_not_change_review_or_write_membership(scene, qtb
     window, interface = scene
     interface.selectFile("first", False)
     interface.selectField("title")
-    interface.set_status("Scanned 2 supported files in 1 albums.")
+    interface.set_status(interface.scanSummary)
     review = open_review(window, interface)
     snapshot = interface.session_state
     click_item(review, "filenameSectionButton")

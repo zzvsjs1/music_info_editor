@@ -202,7 +202,7 @@ def _invalid_response_issue(error: Exception | None = None) -> Issue:
 
     return Issue(
         code=ProviderErrorCode.INVALID_RESPONSE,
-        message="The metadata provider returned an invalid response.",
+        message="The app could not get usable metadata from the provider. Try again later or choose another provider.",
         technical_detail=technical_detail,
     )
 

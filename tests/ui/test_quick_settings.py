@@ -337,8 +337,20 @@ def test_provider_result_updates_only_the_matching_test_and_accepts_its_new_stat
     host.session_state = finish_operation(host.session_state, operation_id)
     host.bridge.completed.emit(operation_id, ProviderConnectionResult(operation_id, "musicbrainz_direct"))
     assert "passed" in facade.testStatus
+    assert "not been tested" not in facade.providerSummary
     assert host.retired == 1
     assert facade.save()
+
+
+def test_provider_test_failure_shows_the_reported_reason_without_credentials(settings):
+    host, facade = settings
+    facade.open()
+    assert facade.testProvider()
+    operation_id = host.pending[0]
+    host.bridge.failed.emit(operation_id, OSError("Connection refused at https://user:secret@proxy.invalid"))
+
+    assert "Connection refused" in facade.testStatus
+    assert "user:secret" not in facade.testStatus
 
 
 def test_unavailable_provider_is_preserved_for_explicit_correction(settings):

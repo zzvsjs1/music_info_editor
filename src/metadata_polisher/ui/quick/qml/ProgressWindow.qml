@@ -80,17 +80,11 @@ ApplicationWindow {
         anchors.margins: metrics.windowMargin
         spacing: metrics.spacing
         Label {
-            Layout.fillWidth: true
-            text: backend.progressKind === "apply"
-                  ? "Only the confirmed changes are being applied. Cancellation waits for a safe file boundary."
-                  : "No files are being changed."
-            wrapMode: Text.WordWrap
-        }
-        Label {
             objectName: "progressStage"
             Layout.fillWidth: true
             text: backend.progressStage
             textFormat: Text.PlainText
+            font.bold: true
             elide: Text.ElideRight
         }
 
@@ -112,18 +106,23 @@ ApplicationWindow {
 
         ProgressBar {
             Layout.fillWidth: true
+            visible: backend.busy
             indeterminate: backend.busy && backend.progress < 0
             value: Math.max(0, backend.progress)
         }
 
-        Label {
-            objectName: "progressCount"
-            text: backend.progressCount
-            visible: text.length > 0
-        }
-        Label {
-            text: "Elapsed: " + Math.floor(progressWindow.elapsedSeconds / 60) + ":"
-                  + String(progressWindow.elapsedSeconds % 60).padStart(2, "0")
+        RowLayout {
+            Layout.fillWidth: true
+            Label {
+                objectName: "progressCount"
+                text: backend.progressCount
+                visible: text.length > 0
+            }
+            Item { Layout.fillWidth: true }
+            Label {
+                text: "Elapsed " + Math.floor(progressWindow.elapsedSeconds / 60) + ":"
+                      + String(progressWindow.elapsedSeconds % 60).padStart(2, "0")
+            }
         }
         ActionButton {
             id: detailsButton
@@ -200,6 +199,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             ActionButton {
                 text: "Copy details"
+                enabled: progressLog.text.length > 0
                 onClicked: {
                     progressLog.selectAll();
                     progressLog.copy();
@@ -215,6 +215,9 @@ ApplicationWindow {
                 text: backend.cancelling ? "Cancelling…" : "Cancel"
                 enabled: backend.busy && !backend.cancelling
                 visible: backend.busy
+                ToolTip.visible: hovered
+                ToolTip.text: backend.progressKind === "apply" ? "Stop at the next safe point."
+                                                              : "Cancel this operation."
                 onClicked: backend.cancelScan()
             }
             ActionButton {

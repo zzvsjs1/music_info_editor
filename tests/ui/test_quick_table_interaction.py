@@ -164,13 +164,14 @@ def test_page_navigation_uses_visible_rows_and_shift_extension(table_scene, qtbo
 
     QTest.keyClick(window, Qt.Key.Key_PageDown, Qt.KeyboardModifier.ShiftModifier)
     qtbot.waitUntil(lambda: table.property("currentRow") > initial)
-    delta, extended = moved.at(0)
+    delta, extended, additive = moved.at(0)
     assert extended is True
+    assert additive is False
     assert delta == max(1, int(viewport(table).height() / table.property("rowHeight")))
 
     QTest.keyClick(window, Qt.Key.Key_PageUp)
     qtbot.waitUntil(lambda: table.property("currentRow") == initial)
-    assert moved.at(1) == [-delta, False]
+    assert moved.at(1) == [-delta, False, False]
     assert included.count() == 0
 
 
@@ -181,12 +182,12 @@ def test_control_boundaries_reveal_the_target_and_keep_shift_intent(table_scene,
 
     QTest.keyClick(window, Qt.Key.Key_End, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
     qtbot.waitUntil(lambda: table.property("currentRow") == 79)
-    assert moved.at(0) == [76, True]
+    assert moved.at(0) == [76, True, True]
     qtbot.waitUntil(lambda: viewport(table).property("contentY") > 0)
 
     QTest.keyClick(window, Qt.Key.Key_Home, Qt.KeyboardModifier.ControlModifier)
     qtbot.waitUntil(lambda: table.property("currentRow") == 0)
-    assert moved.at(1) == [-79, False]
+    assert moved.at(1) == [-79, False, False]
     qtbot.waitUntil(lambda: abs(viewport(table).property("contentY")) < 1)
 
 

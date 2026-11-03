@@ -72,6 +72,14 @@ def test_final_confirmation_distinguishes_same_names_and_exposes_actual_changes(
     assert not backend.executor.pending
 
 
+def test_filename_previews_distinguish_the_same_name_across_albums(audit_backend):
+    backend = audit_backend(_same_named_files())
+    backend.setReviewScope("library")
+    backend.applyUi.showPreviews()
+    assert [row["current"] for row in backend.applyUi.previewRows] == ["first/01.flac", "second/01.flac"]
+    assert not backend.executor.pending
+
+
 def test_final_confirmation_qml_details_retain_paths_and_before_after_values(audit_backend, qtbot):
     backend = audit_backend(_same_named_files())
     warnings = []

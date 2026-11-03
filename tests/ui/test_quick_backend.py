@@ -142,9 +142,19 @@ def test_scan_is_read_only_and_clears_old_choices_only_on_success(backend, qtbot
     assert backend.session_state.root == tmp_path
     assert backend.files.rowCount() == 1
     assert backend.files.index(0, 2).data() == source.name
+    assert backend.status == "Scanned 1 file in 1 album"
     assert backend.includedFileIds == []
     assert backend.selectedFileIds == []
     assert (hashlib.sha256(source.read_bytes()).hexdigest(), source.stat().st_mtime_ns) == before
+
+
+def test_empty_folder_scan_explains_what_to_choose(backend, qtbot, tmp_path):
+    assert backend.scan(str(tmp_path), False)
+    backend.executor.run_next()
+    qtbot.waitUntil(lambda: not backend.busy)
+
+    assert "Choose a folder" in backend.status
+    assert "audio files" in backend.status
 
 
 def test_cancelled_scan_keeps_the_previous_session(backend, qtbot, tmp_path):

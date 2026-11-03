@@ -253,6 +253,17 @@ def build_group_diagnostic_summary(group: GroupState) -> dict[str, object]:
         "language_override": group.language_override,
         "disc_number_override": group.disc_number_override,
         "selected_release": _release_identity(group.selected_release.identity) if group.selected_release else None,
+        "matching_issues": [
+            issue.code.value for issue in group.candidate_lookup.matching_issues
+        ] if group.candidate_lookup else [],
+        "track_list_notices": [
+            {
+                "candidate_identity": list(notice.candidate_identity),
+                "reason": notice.reason_code.value,
+                "provider_error": notice.issue.code.value if notice.issue else None,
+            }
+            for notice in group.candidate_lookup.hydration_notices
+        ] if group.candidate_lookup else [],
         "release_candidates": [
             {
                 "identity": _release_identity(entry.identity),

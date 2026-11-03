@@ -309,7 +309,11 @@ class TransactionalFileWriter:
             issues = (
                 _issue_from_error(
                     MediaErrorCode.COMMIT_FAILED,
-                    "Could not atomically replace the original media file.",
+                    (
+                        "Access denied while saving this file. Close any app using it and check folder permissions."
+                        if isinstance(error, PermissionError)
+                        else "Could not save the edited file. Choose Open log folder in Diagnostics for details."
+                    ),
                     error,
                 ),
                 *self._remove_if_present(progress.temporary_path),

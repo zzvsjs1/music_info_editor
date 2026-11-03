@@ -11,7 +11,7 @@ ApplicationWindow {
                                                && !discardDialog.visible && !backend.confirmationVisible
                                                && !backend.libraryUi.discVisible
     readonly property bool compactHeight: height < metrics.mainCompactHeight
-    readonly property string loadedRoot: backend.rootPath
+    readonly property string loadedRoot: backend.libraryLoaded ? backend.rootPath : ""
     property bool discardCloseConfirmed: false
     property string pendingScanPath: ""
     objectName: "quickWindow"
@@ -161,11 +161,39 @@ ApplicationWindow {
 
     onLoadedRootChanged: restoreLoadedPath()
 
+    function focusAlbumTracks(groupId) {
+        if (!groupId.length) {
+            return;
+        }
+
+        if (backend.groupId !== groupId) {
+            backend.selectGroup(groupId);
+        }
+
+        if (backend.groupId === groupId && backend.files.rowCount() > 0) {
+            if (!backend.selectedFileIds.length) {
+                backend.moveFile(1);
+            }
+
+            fileTable.forceActiveFocus();
+        }
+    }
+
     function openSelectedReview() {
         if (backend.selectedFileIds.length) {
             backend.setReviewScope("selected");
-            backend.openReview();
+            openReview();
         }
+    }
+
+    function openReview() {
+        backend.openReview();
+        if (reviewWindow.visibility === Window.Minimized) {
+            reviewWindow.showNormal();
+        }
+
+        reviewWindow.raise();
+        reviewWindow.requestActivate();
     }
 
     function resetLayout() {
@@ -213,7 +241,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+E"
         enabled: window.active && window.interactionEnabled
-        onActivated: backend.openReview()
+        onActivated: window.openReview()
     }
 
     Shortcut {
@@ -266,8 +294,8 @@ ApplicationWindow {
 
             ActionButton {
                 objectName: "scanButton"
-                text: "Rescan"
-                enabled: window.interactionEnabled
+                text: window.loadedRoot.length && folderPath.text.trim() === window.loadedRoot ? "Rescan" : "Scan"
+                enabled: window.interactionEnabled && folderPath.text.trim().length > 0
                 onClicked: window.requestScan()
             }
         }
@@ -275,8 +303,8 @@ ApplicationWindow {
         Label {
             objectName: "loadedLibraryLabel"
             Layout.fillWidth: true
-            visible: backend.rootPath.length > 0 && folderPath.text !== backend.rootPath
-            text: "Loaded library: " + backend.rootPath
+            visible: window.loadedRoot.length > 0 && folderPath.text.trim() !== window.loadedRoot
+            text: "Loaded library: " + window.loadedRoot
             textFormat: Text.PlainText
             elide: Text.ElideMiddle
             Accessible.name: text
@@ -398,7 +426,9 @@ ApplicationWindow {
                     headerAlignment: Qt.AlignLeft
                     emptyText: ""
                     onRowSelected: function(id, toggle, extend) { backend.selectGroupExtended(id, toggle, extend); }
-                    onMoveExtendedRequested: function(delta, extend) { backend.moveGroup(delta, extend); }
+                    onCellActivated: function(id) { window.focusAlbumTracks(id); }
+                    onActivateRequested: window.focusAlbumTracks(backend.groupId)
+                    onMoveExtendedRequested: function(delta, extend, additive) { backend.moveGroup(delta, extend, additive); }
                     onSelectAllRequested: backend.selectAllGroups()
                     onClearSelectionRequested: backend.clearGroupSelection()
                     onContextRequested: function(id, highlighted, x, y) {
@@ -430,7 +460,7 @@ ApplicationWindow {
                     ActionButton {
                         objectName: "selectAllFilesButton"
                         text: "Select all"
-                        enabled: window.interactionEnabled && backend.files.rowCount() > 0
+                        enabled: window.interactionEnabled && backend.groupId.length > 0 && backend.files.rowCount() > 0
                         onClicked: backend.selectAllFiles()
                     }
 
@@ -453,7 +483,8 @@ ApplicationWindow {
                     ActionButton {
                         objectName: "openReviewButton"
                         text: "Metadata review…"
-                        onClicked: backend.openReview()
+                        enabled: window.interactionEnabled
+                        onClicked: window.openReview()
                     }
 
                     ActionButton {
@@ -496,7 +527,7 @@ ApplicationWindow {
                     }
                     onRestoreDefaultSortRequested: backend.files.restoreDefaultSort()
                     currentRow: backend.currentFileRow
-                    inclusionColumn: true
+                    inclusionColumn: backend.canIncludeFiles
                     columnWidths: scaledWidths(metrics.fileColumns)
                     hiddenColumns: metrics.hiddenFileColumns
                     emptyText: ""
@@ -524,10 +555,12 @@ ApplicationWindow {
                             backend.selectFileExtended(id, false, false);
                         }
 
-                        fileMenu.popup(fileTable, x, y);
+                        if (backend.selectedFileIds.indexOf(id) >= 0) {
+                            fileMenu.popup(fileTable, x, y);
+                        }
                     }
                     onInclusionRequested: function(id, included) { backend.setIncluded(id, included); }
-                    onMoveExtendedRequested: function(delta, extend) { backend.moveFileExtended(delta, extend); }
+                    onMoveExtendedRequested: function(delta, extend, additive) { backend.moveFileExtended(delta, extend, additive); }
                     onToggleInclusionRequested: backend.toggleSelectedIncluded()
                     onSelectAllRequested: backend.selectAllFiles()
                     onClearSelectionRequested: backend.clearSelection()
@@ -570,7 +603,7 @@ ApplicationWindow {
                         id: includeSelectedButton
                         objectName: "includeSelectedButton"
                         text: "Add selected files"
-                        enabled: window.interactionEnabled && backend.selectedFileIds.length > 0
+                        enabled: window.interactionEnabled && backend.canIncludeFiles && backend.selectedFileIds.length > 0
                         onClicked: backend.includeSelection(true)
                     }
 
@@ -605,8 +638,11 @@ ApplicationWindow {
                 Layout.preferredWidth: Math.min(180, implicitWidth)
                 Layout.minimumWidth: 40
                 Layout.maximumWidth: 180
-                text: backend.progressStage
-                Accessible.name: "Show operation progress: " + text
+                text: backend.busy ? backend.progressStage : (enabled ? "Progress details…" : "Idle")
+                enabled: backend.busy || backend.progressLog.length > 0
+                Accessible.name: "Progress details: " + backend.progressStage
+                ToolTip.visible: hovered && enabled
+                ToolTip.text: backend.busy ? "Show progress details" : backend.progressStage
                 contentItem: Label {
                     text: progressButton.text
                     font: progressButton.font
@@ -636,7 +672,7 @@ ApplicationWindow {
         Label {
             Layout.fillWidth: true
             visible: !window.compactHeight
-            text: "Only Apply changes in the final confirmation writes files."
+            text: "Review & Apply lets you check the changes before writing."
             wrapMode: Text.WordWrap
         }
 
@@ -847,11 +883,13 @@ ApplicationWindow {
 
         MenuItem {
             text: "Add selected files"
+            enabled: includeSelectedButton.enabled
             onTriggered: backend.includeSelection(true)
         }
 
         MenuItem {
             text: "Remove from batch"
+            enabled: excludeSelectedButton.enabled
             onTriggered: backend.includeSelection(false)
         }
     }

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QWheelEvent, QWindow
 from PySide6.QtQuick import QQuickItem, QQuickWindow
 from PySide6.QtTest import QSignalSpy, QTest
 
@@ -114,6 +114,8 @@ def test_double_click_after_wheel_reviews_the_hit_file(file_scene, qtbot, review
     assert activated.at(0)[0] == "track-19"
     assert backend.selectedFileIds == ["track-19"]
     assert backend.reviewVisible
+    review = window.findChild(QQuickWindow, "metadataReviewWindow")
+    assert QTest.qWaitForWindowActive(review, 1000)
     assert backend.review.index(0, 2).data() == "Track 19"
     assert backend.includedFileIds == original_inclusion
     assert backend.session_state is original_state
@@ -146,3 +148,33 @@ def test_invalid_or_inclusion_cell_activation_does_not_open_old_review(file_scen
     assert backend.selectedFileIds == ["track-16"]
     assert backend.includedFileIds == ["track-02"]
     assert not backend.executor.pending
+
+
+def test_ctrl_shift_down_keeps_disjoint_mouse_selection(file_scene):
+    window, backend = file_scene
+    table = window.findChild(QQuickItem, "fileTable")
+    backend.selectFileExtended("track-19", True, False)
+    table.forceActiveFocus()
+    QTest.keyClick(window, Qt.Key.Key_Down, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+
+    assert backend.selectedFileIds == ["track-16", "track-19", "track-20"]
+    assert backend.includedFileIds == ["track-02"]
+
+    QTest.keyClick(window, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+    assert backend.selectedFileIds == ["track-19", "track-20", "track-21"]
+
+
+def test_enter_on_a_file_restores_a_minimised_review(file_scene, qtbot):
+    window, backend = file_scene
+    backend.openReview()
+    review = window.findChild(QQuickWindow, "metadataReviewWindow")
+    review.showMinimized()
+    qtbot.waitUntil(lambda: review.visibility() == QWindow.Visibility.Minimized)
+    window.requestActivate()
+    assert QTest.qWaitForWindowActive(window, 2000)
+    window.findChild(QQuickItem, "fileTable").forceActiveFocus()
+    QTest.keyClick(window, Qt.Key.Key_Return)
+
+    assert review.visibility() != QWindow.Visibility.Minimized
+    assert QTest.qWaitForWindowActive(review, 1000)
+    assert backend.scopeFileIds == ["track-16"]

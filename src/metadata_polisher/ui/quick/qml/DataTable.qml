@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 import QtQuick.Templates as T
 import QtQuick.Window
 
@@ -58,8 +59,7 @@ Control {
     signal contextRequested(string stableId, bool highlighted, real x, real y)
     signal valueRequested(string value)
     signal inclusionRequested(string stableId, bool included)
-    signal moveRequested(int delta)
-    signal moveExtendedRequested(int delta, bool extend)
+    signal moveExtendedRequested(int delta, bool extend, bool additive)
     signal toggleInclusionRequested()
     signal selectAllRequested()
     signal clearSelectionRequested()
@@ -311,8 +311,7 @@ Control {
         }
 
         if (delta !== null) {
-            root.moveRequested(delta);
-            root.moveExtendedRequested(delta, extend);
+            root.moveExtendedRequested(delta, extend, control && extend);
             Qt.callLater(root.revealCurrentRow);
             event.accepted = true;
         } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
@@ -647,17 +646,26 @@ Control {
                         // stroke unevenly. Use the nearest whole-device-pixel
                         // stroke at least one logical pixel wide on each screen.
                         border.width: Math.ceil(root.deviceScale) / root.deviceScale
-                        border.color: inclusionToggle.checked || inclusionToggle.hovered
+                        border.color: cell.highlighted ? inclusionToggle.palette.highlightedText
+                            : inclusionToggle.checked || inclusionToggle.hovered
                             ? inclusionToggle.palette.highlight : inclusionToggle.palette.text
                         opacity: inclusionToggle.enabled ? 1 : 0.55
 
-                        Text {
-                            anchors.centerIn: parent
-                            text: "\u2713"
-                            color: inclusionToggle.palette.highlightedText
-                            font.pixelSize: parent.height - root.devicePixelLength(3)
-                            font.bold: true
+                        Shape {
+                            id: tick
+                            anchors.fill: parent
                             visible: inclusionToggle.checked
+                            ShapePath {
+                                strokeColor: inclusionToggle.palette.highlightedText
+                                strokeWidth: root.devicePixelLength(2)
+                                fillColor: "transparent"
+                                capStyle: ShapePath.RoundCap
+                                joinStyle: ShapePath.RoundJoin
+                                startX: tick.width * 0.23
+                                startY: tick.height * 0.51
+                                PathLine { x: tick.width * 0.42; y: tick.height * 0.70 }
+                                PathLine { x: tick.width * 0.78; y: tick.height * 0.30 }
+                            }
                         }
                     }
 

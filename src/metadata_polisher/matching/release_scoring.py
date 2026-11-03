@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from rapidfuzz.fuzz import ratio, token_set_ratio
 
 from metadata_polisher.domain.matching import LocalisedText, ProviderTrack, ReleaseCandidate, ReleaseMedium
+from metadata_polisher.matching.evidence import INCOMPLETE_LISTING_MESSAGE
 from metadata_polisher.matching.language import Language, Script, build_language_profile
 from metadata_polisher.matching.local_release_evidence import (
     LocalEvidenceResult,
@@ -884,7 +885,7 @@ def score_release_medium(
             _evidence(
                 MatchReasonCode.PROVIDER_LIST_INCOMPLETE,
                 0.0,
-                "Provider track or medium listing completeness is unestablished; this result requires review.",
+                INCOMPLETE_LISTING_MESSAGE,
             )
         )
 

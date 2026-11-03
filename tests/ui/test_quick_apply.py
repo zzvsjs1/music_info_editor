@@ -117,6 +117,37 @@ def test_summary_cancel_and_highlighting_never_submit(apply_ui):
     assert host.session_state is snapshot
 
 
+@pytest.mark.parametrize("stale", [False, True])
+def test_apply_guidance_distinguishes_stale_files_from_unreviewed_files(apply_ui, stale):
+    host, facade, _service = apply_ui
+    group = replace(host.session_state.groups[0], reviewed_files=(), requires_rescan=stale)
+    host.set_state(replace(host.session_state, groups=(group,)))
+
+    assert not facade.canApply
+    if stale:
+        assert "rescan" in facade.guidance.lower()
+        assert "metadata review" not in facade.guidance.lower()
+    else:
+        assert "Metadata review" in facade.guidance
+        assert "rescan" not in facade.guidance.lower()
+
+
+def test_blocking_summary_identifies_the_file_and_required_correction(apply_ui):
+    from metadata_polisher.application.apply_summary import ApplySummaryIssue
+    from metadata_polisher.application.changes import ChangeIssueCode
+
+    _host, facade, _service = apply_ui
+    assert facade.beginApply()
+    captured = facade._confirmation
+    row = facade.summaryRows[0]
+    conflict = ApplySummaryIssue(row["id"], ChangeIssueCode.DESTINATION_COLLISION, "Destination exists.")
+    facade._confirmation = replace(captured, summary=replace(captured.summary, blocking_issues=(conflict,)))
+
+    assert f"{row['file']} — Destination exists." in facade.summaryText
+    assert "destination_collision" not in facade.summaryText
+    assert not facade.summaryCanApply
+
+
 @pytest.mark.parametrize("change", ("state", "settings", "inclusion"))
 def test_confirmation_rejects_stale_captured_inputs(apply_ui, change):
     host, facade, _ = apply_ui
@@ -130,6 +161,7 @@ def test_confirmation_rejects_stale_captured_inputs(apply_ui, change):
     assert not facade.confirmApply()
     assert not host.executor.pending
     assert facade.summaryError
+    assert not facade.summaryCanApply
 
 
 def test_verified_completion_consumes_inclusion_and_keeps_reusable_results(apply_ui, qtbot):
@@ -159,6 +191,7 @@ def test_cancelled_partial_batch_retains_unstarted_inclusion(apply_ui, qtbot):
     assert host._included == frozenset((second_id,))
     assert "1 not started" in facade.resultsText
     assert facade.resultsRows[1]["status"] == "not_started"
+    assert facade.resultsRows[1]["statusLabel"] == "Not started"
 
 
 def test_unknown_outcomes_require_rescan_and_keep_all_inclusion(apply_ui, qtbot):
@@ -171,6 +204,7 @@ def test_unknown_outcomes_require_rescan_and_keep_all_inclusion(apply_ui, qtbot)
     assert host.session_state.groups[0].requires_rescan
     assert host._included == included
     assert all(row["status"] == "unknown" for row in facade.resultsRows)
+    assert all(row["final"] == "Unknown" for row in facade.resultsRows)
     assert "unknown" in facade.resultsText.lower()
 
 
@@ -201,6 +235,25 @@ def test_rename_draft_cancel_preserves_live_choices_and_accept_opens_summary(app
     assert not host.executor.pending
     assert all(item.change_set.rename_decision is RenameDecision.APPLY_RENAME
                for item in host.session_state.groups[0].reviewed_files)
+
+
+def test_removing_the_last_renames_without_included_files_skips_empty_confirmation(apply_ui):
+    host, facade, _ = apply_ui
+    host.app_settings = replace(host.app_settings, rename=RenameSettings(template="%title%"))
+    assert facade.beginRename() and facade.acceptRename()
+    facade.cancelApply()
+    host.set_included_file_ids(frozenset())
+
+    assert facade.beginRename()
+    for row in facade.renameRows:
+        facade.setRenameIncluded(row["id"], False)
+
+    assert facade.renameCanAccept and facade.renameRemovesOnly
+    assert facade.acceptRename()
+    assert not facade.renameVisible and not facade.summaryVisible
+    assert all(item.change_set.rename_decision is RenameDecision.KEEP_FILENAME
+               for item in host.session_state.groups[0].reviewed_files)
+    assert not host._included and not host.executor.pending
 
 
 def test_refresh_failure_does_not_consume_inclusion(apply_ui, qtbot):

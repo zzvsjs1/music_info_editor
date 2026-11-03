@@ -7,11 +7,14 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 from metadata_polisher.application.lookup import LookupService
-from metadata_polisher.infrastructure.diagnostics import ThreadSafeOperationIds
+from metadata_polisher.domain.errors import ProviderErrorCode
+from metadata_polisher.infrastructure.diagnostics import ThreadSafeOperationIds, build_group_diagnostic_summary
 from metadata_polisher.infrastructure.session_credentials import SessionCredentials
 from metadata_polisher.infrastructure.settings import AppSettings
 from metadata_polisher.providers.coordinator import ProviderCoordinator
+from metadata_polisher.providers.transport import ProviderTransportError, ProviderTransportErrorContext
 from metadata_polisher.session.state import GroupSelection, GroupState, SessionState, begin_operation, finish_operation
+from metadata_polisher.ui.models.group_model import GroupPresentationStatus, classify_group
 from metadata_polisher.ui.qt_bridge import QtOperationBridge
 from metadata_polisher.ui.quick.lookup import QuickLookup
 from tests.ui.helpers import ControlledExecutor
@@ -134,6 +137,68 @@ def test_candidate_confirmation_rejects_changed_group_evidence(lookup, qtbot):
     assert not facade.chooseCandidate()
     assert not host.executor.pending
     assert "changed" in host.status.lower()
+
+
+def test_blocked_search_and_successful_empty_search_give_different_next_steps(lookup, qtbot):
+    host, facade, provider = lookup
+    provider.search_failure = ProviderTransportError(
+        code=ProviderErrorCode.ACCESS_DENIED,
+        context=ProviderTransportErrorContext(attempt_count=1, status_code=403),
+    )
+    facade.findSelected()
+    complete(qtbot, host)
+    assert "blocked" in facade.candidateNotices
+    assert "Settings" in facade.candidateNotices
+    assert "ACCESS_DENIED" not in facade.candidateNotices
+    assert "Edit search terms" not in facade.candidateNotices
+    assert "no releases" not in facade.candidateNotices
+    assert classify_group(host.session_state.groups[0]) is GroupPresentationStatus.METADATA_ERROR
+
+    provider.search_failure = None
+    provider.candidates = ()
+    facade.closeCandidates()
+    facade.findSelected()
+    complete(qtbot, host)
+    assert "no releases" in facade.candidateNotices
+    assert "Edit search terms" in facade.candidateNotices
+    assert "blocked" not in facade.candidateNotices
+    assert classify_group(host.session_state.groups[0]) is GroupPresentationStatus.NO_SUITABLE_MATCH
+
+
+def test_choosing_a_release_after_partial_search_success_clears_the_search_error(lookup, qtbot):
+    host, facade, working = lookup
+    failed = LookupFakeProvider("vgmdb", (), search_failure=ProviderTransportError(
+        code=ProviderErrorCode.ACCESS_DENIED,
+        context=ProviderTransportErrorContext(attempt_count=1, status_code=403),
+    ))
+    facade._service = LookupService(ProviderCoordinator((working, failed)))
+    facade.findSelected()
+    complete(qtbot, host)
+    assert facade.candidates
+    assert "VGMdb" in facade.candidateNotices and "blocked" in facade.candidateNotices
+    assert classify_group(host.session_state.groups[0]) is not GroupPresentationStatus.METADATA_ERROR
+
+    facade.selectCandidate(facade.candidates[0]["key"])
+    assert facade.chooseCandidate()
+    complete(qtbot, host)
+    assert host.session_state.groups[0].selected_release is not None
+    assert "blocked" not in host.status
+
+
+def test_missing_track_list_identifies_the_release_and_retains_the_code_in_diagnostics(lookup, qtbot):
+    host, facade, provider = lookup
+    provider.candidates = (make_candidate("catalogue", "release-1"),)
+    facade.findSelected()
+    complete(qtbot, host)
+    assert not facade.candidates
+    assert "track list for catalogue release release-1" in facade.candidateNotices
+    assert "BASIC_MEDIA_INVALID" not in facade.candidateNotices
+    diagnostics = build_group_diagnostic_summary(host.session_state.groups[0])
+    assert diagnostics["track_list_notices"] == [{
+        "candidate_identity": ["catalogue", "catalogue", "release-1"],
+        "reason": "BASIC_MEDIA_INVALID",
+        "provider_error": "INVALID_RESPONSE",
+    }]
 
 
 def test_cancel_after_worker_completion_does_not_restart_bulk_queue(lookup, qapp):

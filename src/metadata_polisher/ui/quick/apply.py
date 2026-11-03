@@ -132,10 +132,6 @@ class QuickApply(QObject):
             if source.file_id in self._host._included
         )
 
-    def _can_apply(self) -> bool:
-        selected = self._included_ids()
-        return self._idle() and bool(selected) and set(selected).issubset(reviewed_file_ids(self._host.session_state))
-
     def _can_rename(self) -> bool:
         supported = {source.file_id for group in self._host.session_state.groups for source in group.group.files}
         return (
@@ -145,17 +141,24 @@ class QuickApply(QObject):
             and self._host.app_settings.rename.enabled
         )
 
-    def _guidance(self) -> str:
+    def _apply_blocker(self) -> str:
         if not self._idle():
             return "Wait for the current operation to finish."
 
-        if not self._included_ids():
-            return "Add selected files to review and apply their changes."
+        included = self._host._included
+        if not included:
+            return "Tick Include beside the files you want to change."
 
-        if not self._can_apply():
-            return "Some selected files need a rescan or metadata review before applying changes."
+        state = self._host.session_state
+        if included.issubset(reviewed_file_ids(state)):
+            return ""
 
-        return f"Review and apply changes for {len(self._included_ids())} selected files (Ctrl+Enter)."
+        if any(file.file_id in included
+               for group in state.groups if group.requires_rescan
+               for file in group.group.files):
+            return "An included album needs a rescan. Remove its files from the batch or rescan the folder."
+
+        return "Open Metadata review for the included files and choose the changes to apply."
 
     def _summary_text(self) -> str:
         confirmation = self._confirmation
@@ -164,46 +167,47 @@ class QuickApply(QObject):
             return ""
 
         summary = confirmation.summary
-        lines = [f"{summary.file_count} files selected", f"{summary.write_file_count} files with changes", ""]
+        noun = "file" if summary.file_count == 1 else "files"
+        lines = [f"Changes in {summary.write_file_count} of {summary.file_count} included {noun}"]
 
-        for label, count, fields in (
-            ("values added", summary.addition_count, summary.additions),
-            ("existing values replaced", summary.replacement_count, summary.replacements),
-            ("values cleared", summary.removal_count, summary.removals),
+        for label, fields in (
+            ("Add", summary.additions),
+            ("Replace", summary.replacements),
+            ("Clear", summary.removals),
         ):
-            lines.append(f"{count} {label}")
-            lines.extend(f"    {FIELD_LABELS[item.field]}: {item.count}" for item in fields)
+            if fields:
+                counts = ", ".join(f"{FIELD_LABELS[item.field]} ({item.count})" for item in fields)
+                lines.append(f"{label}: {counts}")
 
-        lines.extend(
-            (
-                f"{summary.rename_count} filenames to rename",
-                f"{len(summary.blocking_issues)} blocking conflicts",
-                "",
-                f"Permanent backup: {'On' if summary.backup_enabled else 'Off'}",
-                f"JSON report: {'On' if summary.report_enabled else 'Off'}",
-            )
-        )
-        lines.extend(
-            f"{issue.file_id} — {issue.code.value}"
-            f"{f' ({FIELD_LABELS[issue.field]})' if issue.field is not None else ''}: {issue.message}"
-            for issue in summary.blocking_issues
-        )
+        if summary.rename_count:
+            lines.append(f"Filenames to change: {summary.rename_count}")
 
-        if not summary.can_apply and not summary.blocking_issues:
-            lines.append("No changes are selected for Apply.")
+        lines.append(f"Permanent backup: {'On' if summary.backup_enabled else 'Off'}"
+                     f" · JSON report: {'On' if summary.report_enabled else 'Off'}")
+
+        if summary.blocking_issues:
+            paths = {row["id"]: row["file"] for row in self._summary_rows}
+            lines.append("\nResolve before applying:")
+            for issue in summary.blocking_issues:
+                path = paths.get(issue.file_id, issue.file_id)
+                field = f" ({FIELD_LABELS[issue.field]})" if issue.field is not None else ""
+                lines.append(f"{path}{field} — {issue.message}")
 
         return redact_sensitive_text("\n".join(lines))
 
-    canApply = Property(bool, _can_apply, notify=changed)
+    canApply = Property(bool, lambda self: not self._apply_blocker(), notify=changed)
     canRename = Property(bool, _can_rename, notify=changed)
     hasResults = Property(bool, lambda self: bool(self._terminal_label), notify=changed)
-    guidance = Property(str, _guidance, notify=changed)
+    guidance = Property(
+        str, lambda self: self._apply_blocker() or "Review changes for the included files (Ctrl+Enter).", notify=changed
+    )
     summaryVisible = Property(bool, lambda self: self._confirmation is not None, notify=changed)
     summaryText = Property(str, _summary_text, notify=changed)
     summaryRows = Property(list, lambda self: self._summary_rows, notify=changed)
     summaryCanApply = Property(
         bool,
-        lambda self: self._confirmation is not None and self._confirmation.summary.can_apply and self._idle(),
+        lambda self: self._confirmation is not None and self._confirmation.summary.can_apply
+        and not self._summary_error and self._idle(),
         notify=changed,
     )
     summaryError = Property(str, lambda self: self._summary_error, notify=changed)
@@ -214,6 +218,10 @@ class QuickApply(QObject):
     renameRows = Property(list, lambda self: self._rename_rows, notify=changed)
     renameSummary = Property(str, lambda self: self._rename_summary, notify=changed)
     renameCanAccept = Property(bool, lambda self: self._rename_can_accept and self._idle(), notify=changed)
+    renameRemovesOnly = Property(
+        bool, lambda self: self._rename_can_accept and not (self._rename_chosen or self._rename_inclusion),
+        notify=changed,
+    )
     renameError = Property(str, lambda self: self._rename_error, notify=changed)
     previewsVisible = Property(bool, lambda self: self._previews_visible, notify=changed)
     previewRows = Property(list, lambda self: self._preview_rows, notify=changed)
@@ -303,9 +311,7 @@ class QuickApply(QObject):
             or host.app_settings != captured.settings
             or host._included != captured.included
         ):
-            self._summary_error = (
-                "The review, settings or included files changed while confirmation was open. Review & apply again."
-            )
+            self._summary_error = "This summary is out of date. Cancel and reopen Review & Apply."
             host.set_status(self._summary_error)
             self.changed.emit()
             return False
@@ -422,18 +428,19 @@ class QuickApply(QObject):
                 {
                     "id": file_id,
                     "included": file_id in self._rename_chosen,
-                    "current": sources[file_id].path.name,
+                    "current": format_library_path(sources[file_id].path, original.root),
                     "preview": preview.new_path.name if preview else "—",
                     "validation": status,
                 }
             )
 
         self._rename_rows = rows
-        self._rename_summary = (
-            f"Filename template: {settings.rename.template}\n"
-            f"{len(selected)} files chosen · {len(keep)} previous renames removed · {len(blocked)} blocked. "
-            + ("Correct or untick blocked files to continue." if blocked else "No files have been changed.")
-        )
+        counts = [f"{len(selected)} of {len(rows)} chosen"]
+        if keep:
+            counts.append(f"Previous renames to remove: {len(keep)}")
+        if blocked:
+            counts.append(f"{len(blocked)} blocked. Untick blocked files or cancel to correct them.")
+        self._rename_summary = f"Filename template: {settings.rename.template}\n" + " · ".join(counts)
         self._rename_can_accept = bool(selected or keep) and not blocked
         self._rename_error = ""
         self.changed.emit()
@@ -468,6 +475,11 @@ class QuickApply(QObject):
         host.set_state(draft)
         host.set_included_file_ids(inclusion)
         self.changed.emit()
+
+        if not inclusion:
+            host.set_status("Rename choices removed. No files are included for writing.")
+            return True
+
         return self.beginApply()
 
     @Slot()
@@ -499,6 +511,7 @@ class QuickApply(QObject):
         if (
             self._preview_state is not None
             and self._preview_state.groups is state.groups
+            and self._preview_state.root == state.root
             and self._preview_file_ids == file_ids
         ):
             return
@@ -520,7 +533,7 @@ class QuickApply(QObject):
                 rows.append(
                     {
                         "id": source.file_id,
-                        "current": source.path.name,
+                        "current": format_library_path(source.path, state.root),
                         "preview": preview.new_path.name if preview else "No filename change",
                         "decision": "Include rename" if rename else "Keep filename",
                         "validation": issues or "Ready",
@@ -590,21 +603,23 @@ class QuickApply(QObject):
             ApplyBatchStatus.CANCELLED: "Cancelled",
             ApplyBatchStatus.FAILED: "Failed",
         }[result.status]
-        message = (
-            f"{self._terminal_label}: {completed} completed, {failed} failed, {skipped} skipped, "
-            f"{not_started} not started, {cancelled} cancelled at a safe boundary, {unchanged} unchanged."
+        counts = ", ".join(
+            f"{count} {label}" for count, label in (
+                (completed, "completed"), (failed, "failed"), (skipped, "skipped"),
+                (not_started, "not started"), (cancelled, "cancelled"), (unchanged, "unchanged"),
+            ) if count
         )
-
-        if any(item.requires_rescan for item in files):
-            message += " Rescan affected groups before further edits."
+        message = f"{self._terminal_label} · {counts}." if counts else self._terminal_label
 
         if reconciliation_failed:
-            message += " Actual file results were retained; reconciliation failed. Rescan affected groups."
+            message += " Could not refresh the review. Rescan the affected groups."
+        elif any(item.requires_rescan for item in files):
+            message += " Rescan the affected groups before editing."
 
         self._terminal_message = redact_sensitive_text(message + "\n\n" + self._result_details(request, result))
-        self._result_rows = [self._result_row(item) for item in files]
+        self._result_rows = [self._result_row(item, request.scan_root) for item in files]
         self._results_visible = True
-        self._host.set_status(self._terminal_message)
+        self._host.set_status(message)
         self.changed.emit()
 
     def _consume_inclusion(self, request: ApplyBatchRequest, result: ApplyBatchResult) -> None:
@@ -666,14 +681,11 @@ class QuickApply(QObject):
         self._failed_reconciliations.discard(operation_id)
         self.last_result, self._last_request = None, request
         self._terminal_label = "Cancelled"
-        self._terminal_message = (
-            "Apply cancelled before any files were processed. All confirmed files were not started.\n\n"
-            "Tag updates / renames / backups / report: not run."
-        )
+        self._terminal_message = "Cancelled before processing any files."
         self._terminal_without_receipt(request, "not_started")
 
     @Slot(str, object)
-    def _failed(self, operation_id: str, _error: object) -> None:
+    def _failed(self, operation_id: str, error: object) -> None:
         request = self._requests.pop(operation_id, None)
 
         if request is None:
@@ -683,9 +695,8 @@ class QuickApply(QObject):
         self.last_result, self._last_request = None, request
         self._terminal_label = "Failed"
         self._terminal_message = (
-            "Apply failed before returning file results. File outcomes are unknown; "
-            "rescan the affected groups before further edits.\n\n"
-            "Tag updates / renames / backups / report: outcome unavailable. Inspect the affected files."
+            "File outcomes are unknown. Rescan the affected groups before editing.\n"
+            + redact_sensitive_text(str(error))
         )
         known = {group.group.group_id for group in self._host.session_state.groups}
         affected = tuple(group.group_id for group in request.groups if group.group_id in known)
@@ -699,20 +710,21 @@ class QuickApply(QObject):
         self._result_rows = [
             {
                 "id": item.source.file_id,
-                "file": item.source.path.name,
+                "file": format_library_path(item.source.path, request.scan_root),
                 "status": status,
-                "final": str(item.source.path),
+                "statusLabel": status.replace("_", " ").capitalize(),
+                "final": "Unknown" if status == "unknown" else str(item.source.path),
                 "details": self._terminal_message,
             }
             for group in request.groups
             for item in group.files
         ]
         self._results_visible = True
-        self._host.set_status(self._terminal_message)
+        self._host.set_status(self._terminal_message.partition("\n")[0])
         self.changed.emit()
 
     @staticmethod
-    def _result_row(outcome: ApplyFileOutcome) -> dict[str, str]:
+    def _result_row(outcome: ApplyFileOutcome, scan_root: Path) -> dict[str, str]:
         reasons = [issue.message for issue in outcome.change_set.validation.issues]
         reasons.extend(issue.message for issue in outcome.refresh_issues)
         transaction = outcome.transaction_result
@@ -730,8 +742,9 @@ class QuickApply(QObject):
 
         status = "not_started" if outcome.skip_reason is FileSkipReason.CANCELLED_BEFORE_START else outcome.status.value
         values = {
-            "file": outcome.source_path.name,
+            "file": format_library_path(outcome.source_path, scan_root),
             "status": status,
+            "statusLabel": status.replace("_", " ").capitalize(),
             "final": str(outcome.final_path),
             "details": "; ".join(reasons),
         }
@@ -760,10 +773,11 @@ class QuickApply(QObject):
         report_text = {
             ReportWriteStatus.DISABLED: "disabled",
             ReportWriteStatus.WRITTEN: f"written to {report.path}",
-            ReportWriteStatus.FAILED: f"failed ({report.error_code}); completed media writes remain completed",
+            ReportWriteStatus.FAILED: f"failed ({report.error_code})",
         }[report.status]
         return (
-            f"Verified completed tag updates: {updates}; renames: {renames}. Backups: {backups}. Report: {report_text}."
+            f"Files with tags updated: {updates} · Files renamed: {renames}\n"
+            f"Permanent backups: {backups}\nJSON report: {report_text}"
         )
 
     @Slot()

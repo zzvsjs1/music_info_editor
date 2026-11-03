@@ -16,7 +16,7 @@ from metadata_polisher.application.lookup import (
     build_release_search_query,
 )
 from metadata_polisher.application.review import set_manual_track_assignment
-from metadata_polisher.domain.errors import ProviderErrorCode
+from metadata_polisher.domain.errors import MatchingErrorCode
 from metadata_polisher.domain.matching import ReleaseSearchQuery
 from metadata_polisher.execution.cancellation import CancellationToken, OperationCancelledError
 from metadata_polisher.execution.events import OperationEventSink
@@ -27,6 +27,7 @@ from metadata_polisher.matching.release_scoring import RankedReleaseMedium
 from metadata_polisher.matching.track_mapping import TrackMappingResult
 from metadata_polisher.providers.base import RequestContext
 from metadata_polisher.providers.catalogue import provider_label
+from metadata_polisher.providers.coordinator import CandidateHydrationReasonCode, ProviderFailure
 from metadata_polisher.providers.runtime import ProviderRuntime, _normalise_musicbrainz_contact
 from metadata_polisher.rename.template import FilenameRenderPolicy
 from metadata_polisher.session.lookup_editing import (
@@ -49,43 +50,52 @@ if TYPE_CHECKING:
     from metadata_polisher.ui.quick.backend import QuickBackend
 
 
+def _failure_message(failure: ProviderFailure) -> str:
+    provider = provider_label(failure.engine_id, fallback=failure.engine_id)
+    return redact_sensitive_text(f"{provider}: {failure.issue.message}")
+
+
 def _lookup_notices(result: CandidateLookupResult) -> str:
-    """Retain empty-success, request-failure and hydration receipts separately."""
+    """Distinguish an empty catalogue search from a failed request or missing track list."""
     messages: list[str] = []
 
     for summary in result.lookup_result.summaries:
         if summary.successful_queries:
             count = summary.candidate_count
-            outcome = f"{count} matching releases" if count else "No matching releases"
-            messages.append(f"{summary.engine_id}: {outcome} ({summary.successful_queries} searches completed).")
+            provider = provider_label(summary.engine_id, fallback=summary.engine_id)
+            outcome = "1 release" if count == 1 else f"{count or 'no'} releases"
+            messages.append(f"{provider} returned {outcome} for these search terms.")
 
-    recovery = {
-        ProviderErrorCode.ACCESS_DENIED: "The provider blocked access. Retry later or choose a provider in Settings.",
-        ProviderErrorCode.PROXY_AUTHENTICATION_REQUIRED: (
-            "Check session proxy credentials in Settings, then test again."
-        ),
-        ProviderErrorCode.PROXY_CONNECTION_FAILED: "Check the proxy host, port and running proxy service in Settings.",
-        ProviderErrorCode.TLS_VERIFICATION_FAILED: "Check the system clock and certificate trust; checks stay enabled.",
-        ProviderErrorCode.AUTHENTICATION_REQUIRED: "Check the provider's access requirements in Settings.",
-        ProviderErrorCode.RATE_LIMITED: "Wait before retrying this provider; its request limit was reached.",
-    }
+    messages.extend(_failure_message(failure) for failure in result.lookup_result.failures)
 
-    for failure in result.lookup_result.failures:
-        messages.append(f"{failure.engine_id}: {failure.issue.code.value} — {failure.issue.message}")
-        advice = recovery.get(failure.issue.code) if isinstance(failure.issue.code, ProviderErrorCode) else None
-        advice = advice or "Retry Find Metadata; check the connection and test it in Settings."
-        messages.append(f"{failure.engine_id}: {advice}")
-
+    skipped = 0
     for notice in result.hydration_notices:
-        detail = f"{notice.issue.code.value} — {notice.issue.message}" if notice.issue else ""
-        messages.append(f"{' / '.join(notice.candidate_identity)}: {notice.reason_code.value} — {detail}")
+        if notice.reason_code is CandidateHydrationReasonCode.PER_ENGINE_LIMIT_REACHED:
+            skipped += 1
+        elif notice.issue is not None:
+            engine_id, _source_id, release_id = notice.candidate_identity
+            provider = provider_label(engine_id, fallback=engine_id)
+            messages.append(
+                f"Could not load the track list for {provider} release {release_id}. {notice.issue.message}"
+            )
 
-    messages.extend(f"{issue.code.value} — {issue.message}" for issue in result.matching_issues)
+    if skipped:
+        releases = "release" if skipped == 1 else "releases"
+        messages.append(
+            f"The app reached its track list limit and skipped {skipped} {releases}. "
+            "Use more specific search terms to narrow the results."
+        )
+
+    # Search summaries and failures above explain an empty result. In particular,
+    # a denied request tells us nothing about whether the catalogue has the album.
+    for issue in result.matching_issues:
+        if issue.code != MatchingErrorCode.NO_CANDIDATE or not messages:
+            messages.append(issue.message)
 
     if not result.lookup_result.candidates and any(
         summary.successful_queries for summary in result.lookup_result.summaries
     ):
-        messages.append("Close this window and use Edit search terms to try another album title or artist.")
+        messages.append("Use Edit search terms to try another album title or artist, then search again.")
 
     return redact_sensitive_text("\n".join(dict.fromkeys(messages)))
 
@@ -471,7 +481,7 @@ class QuickLookup(QObject):
     def _queue_message(self, heading: str) -> None:
         self._host.set_status(
             f"{heading} Completed {self._queue_completed} of {self._queue_total} groups. "
-            f"{self._queue_skipped} skipped; {self._queue_issues} with provider issues."
+            f"Groups skipped: {self._queue_skipped}. Groups with errors: {self._queue_issues}."
         )
 
     def _submit(self, group: GroupState, identity: ReleaseMediumIdentity | None = None) -> bool:
@@ -572,33 +582,31 @@ class QuickLookup(QObject):
         ):
             return
 
-        failures = result.candidate_lookup.lookup_result.failures
-        if result.selected_metadata is not None:
-            failures += result.selected_metadata.failures
+        # A selection reuses a previous search. Report only failures from the
+        # operation that just finished, even if that search had partial results.
+        failures = (
+            result.candidate_lookup.lookup_result.failures
+            if result.selected_metadata is None else result.selected_metadata.failures
+        )
+        search_issues = bool(failures) or any(notice.issue for notice in result.candidate_lookup.hydration_notices)
 
         if operation_id == self._stopped_id:
             self._stopped_id = None
             self._queue_completed += 1
-            self._queue_issues += bool(failures)
+            self._queue_issues += search_issues
             self._queue_message("Lookup queue stopped. Completed results remain available.")
             return
 
         if searching and self._bulk:
             self._queue_completed += 1
-            self._queue_issues += bool(failures)
+            self._queue_issues += search_issues
             self._next_group()
             return
 
         if searching:
             self._open_candidates(group)
 
-        self._host.set_status(
-            redact_sensitive_text(
-                "\n".join(
-                    f"{failure.engine_id}: {failure.issue.code.value} — {failure.issue.message}" for failure in failures
-                )
-            )
-        )
+        self._host.set_status("\n".join(dict.fromkeys(_failure_message(failure) for failure in failures)))
 
     @Slot(str)
     def _stop_queue(self, operation_id: str, error: object = None) -> None:
@@ -610,14 +618,10 @@ class QuickLookup(QObject):
             self._stopped_id = operation_id
 
             if error is not None:
-                # A worker exception stops the queue before a typed provider
-                # receipt exists. Count that failed group and preserve its
-                # redacted cause in the primary feedback, as well as the log.
+                # The worker stopped before returning a provider outcome. The
+                # exception is available in Progress details and the app log.
                 self._queue_issues += 1
-                self._queue_message(
-                    "Lookup queue failed. " + redact_sensitive_text(str(error))
-                    + " Completed results remain available."
-                )
+                self._queue_message("Lookup stopped after an error. Open Progress details for the cause.")
             else:
                 self._queue_message("Lookup queue stopped. Completed results remain available.")
 
@@ -701,7 +705,7 @@ class QuickLookup(QObject):
                 }
                 for item in entry.result.evidence
             ]
-            self._why_text = "The score is a deterministic ranking, not a probability.\n\n" + "\n\n".join(
+            self._why_text = "\n\n".join(
                 f"{row['reason']} · {row['contribution']}\n{row['detail']}" for row in self._why_rows
             )
             self._why_visible = True
@@ -890,7 +894,7 @@ class QuickLookup(QObject):
         credentials: CredentialSnapshot | None = None,
     ) -> LookupService | None:
         if settings.selected_provider_id is None:
-            self._host.set_status("Online lookup is disabled in Settings; local editing remains available.")
+            self._host.set_status("Online lookup is off. Choose a provider in Settings to search for metadata.")
             return None
 
         if settings.selected_provider_id == "musicbrainz_direct" and not self._contact:

@@ -1,5 +1,5 @@
 # Source releases contain the application and reproducible public development files.
-include LICENSE THIRD_PARTY_NOTICES.md README.md CONTRIBUTING.md SECURITY.md
+include LICENSE THIRD_PARTY_NOTICES.md README.md CONTRIBUTING.md SECURITY.md AGENTS.md
 include .gitignore pyproject.toml MANIFEST.in
 recursive-include .github *.yml *.md
 recursive-include packaging *.spec

@@ -678,14 +678,14 @@ def _matching_issues(
             ),
         )
 
-    if (
-        not release_ranking.entries
-        or release_ranking.entries[0].result.classification is MatchClassification.LOW
-    ):
+    if not release_ranking.entries or release_ranking.entries[0].result.classification is MatchClassification.LOW:
         return (
             Issue(
                 code=MatchingErrorCode.INSUFFICIENT_EVIDENCE,
-                message="No candidate has enough real media evidence for a reliable match.",
+                message=(
+                    "The closest match scored low. Compare its details with your album before choosing it."
+                    if release_ranking.entries else "No track lists were available to compare with your files."
+                ),
             ),
         )
 
@@ -693,7 +693,7 @@ def _matching_issues(
         return (
             Issue(
                 code=MatchingErrorCode.AMBIGUOUS_CANDIDATE,
-                message="More than one candidate remains plausible; choose one explicitly.",
+                message="Several releases scored similarly. Compare their dates and disc details before choosing one.",
             ),
         )
 

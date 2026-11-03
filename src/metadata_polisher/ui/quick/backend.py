@@ -333,17 +333,17 @@ class QuickBackend(QObject):
             count = len(target.file_ids)
             return f"Set common {labels} for {count} {'file' if count == 1 else 'files'}"
 
-        return f"Manual value: {(target.field if target else self._field).value}"
+        return f"Edit {FIELD_LABELS[target.field if target else self._field]}"
 
     def _edit_hint(self) -> str:
         field = self._edit.field if self._edit is not None else self._field
         if field in _LIST_FIELDS:
-            return "One value per line. Punctuation stays within a value."
+            return "Enter one value per line. Keep punctuation within a value."
 
         if field in _POSITION_FIELDS:
-            return "Number and total are independent. Missing removes that component. Use Clear to remove the field."
+            return "Use 0 to keep the existing number or total. To remove both, use Clear selected fields."
 
-        return "Enter a value. Use Clear field to remove it. Mixed selections start empty."
+        return "To remove a value, use Clear selected fields."
 
     def _current_file_row(self) -> int:
         if self._group() is None or not self._selected:
@@ -386,14 +386,11 @@ class QuickBackend(QObject):
         return f"{row + 1} of {len(group.group.files)}" if group is not None and row >= 0 else ""
 
     def _review_message(self) -> str:
-        # Scan details already show a concise, pluralised success summary. The
-        # legacy status string may append settings-save warnings: retain those
-        # verbatim while suppressing only the exact duplicate success line.
-        count = sum(len(group.group.files) for group in self.session_state.groups)
-        success = f"Scanned {count} supported files in {len(self.session_state.groups)} albums."
+        # The scan section already shows its summary. Keep any accompanying
+        # warning visible, for example when remembering the folder failed.
         first, _separator, remainder = self._status.partition("\n")
 
-        return remainder if first == success else self._status
+        return remainder if first == self._scan_summary() else self._status
 
     def _review_scope_label(self) -> str:
         ids = self._scope_ids()
@@ -464,12 +461,15 @@ class QuickBackend(QObject):
 
         count = sum(len(group.group.files) for group in self.session_state.groups)
         albums = len(self.session_state.groups)
+        warnings = self._scan_warning_count()
+
+        if not count and not warnings:
+            return "No supported audio files found. Choose a folder containing music."
+
         summary = (
             f"Scanned {count} {'file' if count == 1 else 'files'} "
             f"in {albums} {'album' if albums == 1 else 'albums'}"
         )
-        warnings = self._scan_warning_count()
-
         return summary + (f" · {warnings} {'warning' if warnings == 1 else 'warnings'}" if warnings else "")
 
     def _scan_details(self) -> str:
@@ -661,6 +661,12 @@ class QuickBackend(QObject):
     # One notification publishes a consistent snapshot. QML has no setters for
     # semantic state; every mutation below checks eligibility before dispatch.
     files = Property(QObject, lambda self: self._file_proxy, constant=True)
+    # The file view displays one album or the unsupported collection. All
+    # rows in that collection share the source model's inclusion policy.
+    canIncludeFiles = Property(
+        bool, lambda self: bool(self._files.flags(self._files.index(0, 0)) & Qt.ItemFlag.ItemIsUserCheckable),
+        notify=changed,
+    )
     albumModel = Property(QObject, lambda self: self._album_proxy, constant=True)
     review = Property(QObject, lambda self: self._review_proxy, constant=True)
 
@@ -731,6 +737,7 @@ class QuickBackend(QObject):
     rootPath = Property(
         str, lambda self: str(self.session_state.root or self.app_settings.general.last_root_folder), notify=changed
     )
+    libraryLoaded = Property(bool, lambda self: self.session_state.root is not None, notify=changed)
     summary = Property(str, _summary, notify=changed)
     providerLabel = Property(str, lambda self: self._facade("lookup").providerLabel, notify=changed)
     canNavigate = Property(
@@ -943,12 +950,12 @@ class QuickBackend(QObject):
         self._group_selection = chosen
         self._refresh()
 
-    @Slot(int, bool)
-    def moveGroup(self, delta: int, extend: bool) -> None:
+    @Slot(int, bool, bool)
+    def moveGroup(self, delta: int, extend: bool, additive: bool = False) -> None:
         ids = self._album_proxy.visible_ids()
         if ids:
             current = self._current_group_row()
-            self.selectGroupExtended(ids[max(0, min(len(ids) - 1, current + delta))], False, extend)
+            self.selectGroupExtended(ids[max(0, min(len(ids) - 1, current + delta))], additive, extend)
 
     @Slot()
     def selectAllGroups(self) -> None:
@@ -998,13 +1005,13 @@ class QuickBackend(QObject):
             self._file_anchor = key
         self._refresh_review()
 
-    @Slot(int, bool)
-    def moveFileExtended(self, delta: int, extend: bool) -> None:
+    @Slot(int, bool, bool)
+    def moveFileExtended(self, delta: int, extend: bool, additive: bool = False) -> None:
         group = self._group()
         if group and group.group.files:
             ids = self._file_proxy.visible_ids()
             row = max(0, min(len(ids) - 1, self._current_file_row() + delta))
-            self.selectFileExtended(ids[row], False, extend)
+            self.selectFileExtended(ids[row], additive, extend)
 
     @Slot(str, bool)
     def selectFile(self, file_id: str, toggle: bool) -> None:
@@ -1103,14 +1110,14 @@ class QuickBackend(QObject):
             self._field = self._fields[0]
         self._refresh_review()
 
-    @Slot(int, bool)
-    def moveFieldExtended(self, delta: int, extend: bool) -> None:
+    @Slot(int, bool, bool)
+    def moveFieldExtended(self, delta: int, extend: bool, additive: bool = False) -> None:
         fields = list(MetadataField)
         # Down from an untouched review starts on Title, rather than skipping
         # it merely because Title is the private fallback focus identity.
         current = fields.index(self._field) if self._fields else -1
         field = fields[max(0, min(len(fields) - 1, current + delta))]
-        self.selectFieldExtended(field.value, False, extend)
+        self.selectFieldExtended(field.value, additive, extend)
 
     @Slot()
     def selectAllFields(self) -> None:
@@ -1168,6 +1175,9 @@ class QuickBackend(QObject):
 
     @Slot(bool)
     def includeSelection(self, include: bool) -> None:
+        if include and not self.canIncludeFiles:
+            return
+
         self.set_included_file_ids(
             self._included | set(self._selected) if include else self._included - set(self._selected)
         )
@@ -1205,7 +1215,11 @@ class QuickBackend(QObject):
             return False
 
         self._edit = _EditTarget(self._scope_ids(), self._field, self.session_state.revision, self._fields)
-        value = aggregate_review_fields(self.session_state, self._scope_ids(), (self._field,))[0].final.value
+        # The editor applies one draft to the entire selection. Seed it only
+        # when every selected field shares that final value across the files.
+        rows = aggregate_review_fields(self.session_state, self._edit.file_ids, self._edit.fields)
+        first = rows[0].final
+        value = first.value if all(row.final == first for row in rows) else None
         self._edit_position = value if isinstance(value, Position) else Position()
         if isinstance(value, tuple):
             self._edit_value = "\n".join(value)
@@ -1581,8 +1595,8 @@ class QuickBackend(QObject):
             self.session_state = reduced.state if isinstance(reduced, StateApplicationResult) else reduced
         except Exception as error:
             self._finish(
-                operation_id, f"Result reconciliation failed: {error}",
-                stage="Result reconciliation failed", failed=True,
+                operation_id, f"Could not load the results into the current review. {error}",
+                stage="Could not load results", failed=True,
             )
             self.controller_failed.emit(operation_id, error)
             return
@@ -1593,8 +1607,7 @@ class QuickBackend(QObject):
             self._selected = ()
             self._included = frozenset()
             self._ensure_group()
-            count = len(result.scan_result.supported_files)
-            message = f"Scanned {count} supported files in {len(self.session_state.groups)} albums."
+            message = self._scan_summary()
             settings_warning = cast("QuickLibrary", self._facade("library")).remember_root(result.root)
             if settings_warning:
                 message += "\n" + settings_warning
@@ -1605,7 +1618,7 @@ class QuickBackend(QObject):
             if self.session_state.scan_issues:
                 message += "\n" + "\n".join(issue.message for issue in self.session_state.scan_issues)
         elif isinstance(result, ScanLibraryResult):
-            message = "The scan became outdated; the current review was preserved."
+            message = "These scan results are outdated. Scan the folder again to refresh the library."
 
         if matched and kind is OperationKind.SCAN and accepted:
             self._progress_visible = False
@@ -1614,13 +1627,13 @@ class QuickBackend(QObject):
     @Slot(str)
     def _on_cancelled(self, operation_id: str) -> None:
         if self._matches(operation_id):
-            self._finish(operation_id, "Operation cancelled; the current review was preserved.", stage="Cancelled")
+            self._finish(operation_id, "Operation cancelled.", stage="Cancelled")
 
     @Slot(str, object)
     def _on_failed(self, operation_id: str, error: object) -> None:
         if self._matches(operation_id):
             self._finish(
-                operation_id, f"Operation failed: {error}\nThe current review was preserved.",
+                operation_id, f"{self.progressTitle} failed. {error}",
                 stage="Failed", failed=True,
             )
 

@@ -2,11 +2,14 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from metadata_polisher.application.lookup import GroupLookupResult
+from metadata_polisher.domain.errors import Issue, MediaErrorCode, ProviderErrorCode
 from metadata_polisher.execution.cancellation import NeverCancelledToken
+from metadata_polisher.execution.events import FileFailed, FileTransactionStage, ProviderFailed
 from metadata_polisher.infrastructure.settings import AppSettings, RenameSettings, load_settings, save_settings
 from metadata_polisher.session.apply_preparation import prepare_apply_request
 from metadata_polisher.session.state import GroupSelection, SessionState
@@ -129,3 +132,28 @@ def test_explanation_rows_retain_zero_contributions_and_full_details(make_backen
                     if entry.identity == selected)
     assert rows == [{"reason": item.code, "contribution": f"{item.contribution:g}", "detail": item.detail}
                     for item in evidence]
+
+
+def test_provider_failure_logs_redacted_diagnostics_without_detailed_tracing(make_backend, caplog):
+    backend = make_backend()
+    issue = Issue(ProviderErrorCode.ACCESS_DENIED, "The request was blocked.", "status=403 token=PRIVATE_VALUE")
+
+    with caplog.at_level("WARNING"):
+        backend.bridge.operation_event.emit(ProviderFailed("LOOKUP-0001", "vgmdb", issue))
+
+    assert "vgmdb ACCESS_DENIED: status=403" in caplog.text
+    assert "PRIVATE_VALUE" not in caplog.text
+
+
+def test_file_failure_logs_the_system_error_without_detailed_tracing(make_backend, caplog):
+    backend = make_backend()
+    path = Path("Album/Track.flac")
+    issue = Issue(MediaErrorCode.COMMIT_FAILED, "Could not save the file.", "PermissionError: access denied")
+
+    backend.bridge.operation_event.emit(FileFailed(
+        "APPLY-0001", "track", path, path, FileTransactionStage.COMMITTING, (issue,),
+    ))
+
+    assert "Track.flac" in caplog.text
+    assert "COMMIT_FAILED" in caplog.text
+    assert "PermissionError: access denied" in caplog.text

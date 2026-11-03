@@ -26,6 +26,7 @@ from metadata_polisher.domain.review import (
     ProposalRanking,
     ReviewReasonCode,
 )
+from metadata_polisher.matching.evidence import INCOMPLETE_LISTING_MESSAGE
 from metadata_polisher.matching.language import Language, LanguageProfileReason, build_language_profile
 from metadata_polisher.matching.normalisation import normalise_for_matching
 from metadata_polisher.matching.release_scoring import (
@@ -1353,7 +1354,7 @@ def set_manual_track_assignment(
         evidence = (*evidence, MatchEvidence(
             MatchReasonCode.PROVIDER_LIST_INCOMPLETE,
             0.0,
-            "The provider track or media listing is incomplete; confirming pairs does not establish missing rows.",
+            INCOMPLETE_LISTING_MESSAGE,
         ))
 
     if ordered.notice is not None and ordered.notice.code not in retained_codes:

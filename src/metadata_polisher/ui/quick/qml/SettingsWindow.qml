@@ -419,8 +419,7 @@ ApplicationWindow {
                         text: "Type % to choose a field, then press Enter or Tab to insert it. "
                               + "Press Escape to close suggestions, or Ctrl+Space to reopen them inside a field. "
                               + "Put optional content in brackets, for example [%discnumber%.]. "
-                              + "The file extension is retained automatically. Minimum digit widths are limited to 1–10: "
-                              + "ten digits cover the largest editable track or disc number without excessive zero padding."
+                              + "The file extension is kept. Set minimum track digits to 2 to display track 1 as 01."
                     }
                 }
             }
@@ -492,12 +491,13 @@ ApplicationWindow {
 
                         ActionButton {
                             text: "Cancel test"
-                            enabled: settings.testRunning
+                            visible: settings.testRunning
                             onClicked: settings.cancelTest()
                         }
                     }
 
                     AppScrollView {
+                        visible: settings.testStatus.length > 0
                         Layout.fillWidth: true
                         Layout.preferredHeight: Math.min(90, testResult.implicitHeight)
                         contentWidth: availableWidth

@@ -7,6 +7,10 @@ fallback supply evidence only; neither operation changes the stored metadata.
 from metadata_polisher.domain.media import LocalMediaFile
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField
 
+INCOMPLETE_LISTING_MESSAGE = (
+    "The full track and disc listing is unconfirmed. Check the listed tracks against your files."
+)
+
 
 def _usable_text(value: str | None) -> str | None:
     """Collapse comparison whitespace and distinguish blank from usable text."""

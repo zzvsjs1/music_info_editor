@@ -54,7 +54,7 @@ ApplicationWindow {
 
         Label {
             Layout.fillWidth: true
-            text: "The score is a deterministic ranking, not a probability."
+            text: "The score shows how closely the available details match. Select a reason to see what was compared."
             wrapMode: Text.WordWrap
         }
 

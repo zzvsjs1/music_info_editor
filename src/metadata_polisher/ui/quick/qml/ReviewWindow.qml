@@ -254,7 +254,7 @@ ApplicationWindow {
                         Label {
                             id: metadataTitle
                             Layout.fillWidth: true
-                            text: "1  Metadata review"
+                            text: "Metadata fields"
                             font.bold: true
                         }
                         Label {
@@ -311,8 +311,19 @@ ApplicationWindow {
                     }
 
                     onCellActivated: function(stableId, value, column) {
+                        // A double-click can arrive before the corresponding
+                        // selection. Never fall back to editing a previous row.
+                        if (backend.selectedFields.indexOf(stableId) < 0) {
+                            backend.selectField(stableId);
+                        }
+                        if (backend.selectedFields.indexOf(stableId) < 0) {
+                            return;
+                        }
+
                         if (column === 4) {
                             backend.beginEdit();
+                        } else {
+                            reviewWindow.openDetails(backend.fieldDetails);
                         }
                     }
 
@@ -324,13 +335,18 @@ ApplicationWindow {
                         fieldMenu.popup(reviewTable, x, y);
                     }
 
-                    onMoveExtendedRequested: function(delta, extend) {
-                        backend.moveFieldExtended(delta, extend);
+                    onMoveExtendedRequested: function(delta, extend, additive) {
+                        backend.moveFieldExtended(delta, extend, additive);
                     }
 
                     onSelectAllRequested: backend.selectAllFields()
                     onClearSelectionRequested: backend.clearFieldSelection()
                     onEditRequested: backend.beginEdit()
+                    onActivateRequested: {
+                        if (backend.selectedFields.length > 0) {
+                            reviewWindow.openDetails(backend.fieldDetails);
+                        }
+                    }
                     onValueRequested: function(value) { reviewWindow.openDetails(value); }
                 }
 
@@ -426,7 +442,7 @@ ApplicationWindow {
                     ToolButton {
                         id: filenameToggle
                         objectName: "filenameSectionButton"
-                        text: (checked ? "▾" : "▸") + "  2  Filename review"
+                        text: checked ? "Hide filename review" : "Show filename review"
                         checkable: true
                         checked: backend.hasFilenameSuggestion || backend.filenameNeedsAttention
                         Accessible.name: (checked ? "Collapse" : "Expand") + " filename review"
@@ -514,16 +530,16 @@ ApplicationWindow {
                     ToolButton {
                         id: diagnosticsToggle
                         objectName: "scanDetailsButton"
-                        text: (checked ? "▾" : "▸") + "  Scan details"
+                        text: checked ? "Hide scan details" : "Show scan details"
                         checkable: true
                         checked: backend.scanHasWarnings || reviewWindow.scanFailed
                         Accessible.name: (checked ? "Hide" : "View") + " scan details"
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: reviewWindow.scanFailed ? "Scan failed · Previous review retained"
+                        text: reviewWindow.scanFailed ? "Scan failed"
                               : (backend.scanHasWarnings ? "Warning · " : "") + backend.scanSummary
-                        visible: backend.scanSummary.length > 0
+                        visible: text.length > 0
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         ToolTip.visible: scanHover.hovered
@@ -662,14 +678,20 @@ ApplicationWindow {
         width: Math.min(800, reviewWindow.width - 48)
         height: Math.min(520, reviewWindow.height - 48)
         modal: true
+        focus: true
         title: "Full value and details"
         standardButtons: Dialog.Close
+        onOpened: fullValueText.forceActiveFocus()
+        onClosed: reviewTable.forceActiveFocus()
         contentItem: AppScrollView {
             clip: true
+            contentWidth: availableWidth
             TextArea {
                 id: fullValueText
+                objectName: "fullReviewValue"
                 readOnly: true
                 selectByMouse: true
+                textFormat: TextEdit.PlainText
                 wrapMode: TextEdit.WrapAnywhere
             }
         }

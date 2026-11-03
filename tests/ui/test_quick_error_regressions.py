@@ -84,7 +84,7 @@ def test_progress_retains_at_most_two_hundred_actual_lines(error_backend, qtbot,
     assert len(backend.progressStage) <= 120
 
 
-def test_bulk_lookup_failure_preserves_cause_in_primary_status(qapp, qtbot):
+def test_bulk_lookup_failure_points_to_the_cause_in_progress_details(qapp, qtbot):
     first = GroupState(group=make_group(make_media_file("01.flac", title="Opening")))
     second = GroupState(group=replace(make_group(make_media_file("02.flac", title="Opening")), group_id="second"))
     state = SessionState(root=Path("library"), groups=(first, second), selection=GroupSelection(first.group.group_id))
@@ -101,9 +101,10 @@ def test_bulk_lookup_failure_preserves_cause_in_primary_status(qapp, qtbot):
 
         assert not backend.busy
         assert not backend.executor.pending
-        assert "Synthetic timeout XYZ" in backend.status
-        assert "failed" in backend.status.lower()
-        assert "0 with provider issues" not in backend.status
+        assert "Synthetic timeout XYZ" in backend.progressLog
+        assert "Synthetic timeout XYZ" not in backend.status
+        assert "Progress details" in backend.status
+        assert "Groups with errors: 1" in backend.status
         assert all(group.candidate_lookup is None for group in backend.session_state.groups)
     finally:
         lookup.close()
@@ -131,7 +132,7 @@ def test_apply_reconciliation_failure_closes_progress_and_retains_receipts(error
     assert not backend.busy
     assert apply.resultsVisible
     assert all(row["status"] == "applied" for row in apply.resultsRows)
-    assert "reconciliation failed" in apply.resultsText
+    assert "Rescan the affected groups" in apply.resultsText
     assert backend.session_state.groups[0].requires_rescan
     assert backend._included == included
     assert not backend.progressVisible

@@ -40,7 +40,8 @@ ApplicationWindow {
 
         Label {
             Layout.fillWidth: true
-            text: "Select a release and disc to build metadata proposals."
+            text: "Choose the release and disc that match your files."
+            visible: lookup.candidates.length > 0
             wrapMode: Text.WordWrap
         }
 

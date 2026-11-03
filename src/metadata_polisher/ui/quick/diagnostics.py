@@ -9,6 +9,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 
 from metadata_polisher.application.apply import ApplyBatchResult
 from metadata_polisher.application.lookup import GroupLookupResult
+from metadata_polisher.execution.events import FileFailed, ProviderFailed
 from metadata_polisher.infrastructure.diagnostic_trace import DetailedTraceSink
 from metadata_polisher.infrastructure.diagnostics import build_group_diagnostic_summary, sanitise_diagnostic_data
 from metadata_polisher.infrastructure.logging_setup import configure_logging, redact_sensitive_text
@@ -29,6 +30,7 @@ class QuickDiagnostics(QObject):
         self.configure()
         host.bridge.operation_event.connect(self._on_event)
         host.bridge.failed.connect(self.failed)
+        host.controller_failed.connect(self.failed)
         host.bridge.completed.connect(self.completed)
         host.bridge.cancelled.connect(self.cancelled)
 
@@ -41,6 +43,20 @@ class QuickDiagnostics(QObject):
     @Slot(object)
     def _on_event(self, event: object) -> None:
         operation_id = getattr(event, "operation_id", None)
+
+        if isinstance(event, ProviderFailed):
+            # Provider failures can complete a lookup normally with partial
+            # results. Keep the adapter's safe diagnostic context in the log.
+            self.logger.warning(
+                "Operation %s: %s %s: %s", event.operation_id, event.engine_id,
+                event.issue.code.value, redact_sensitive_text(event.issue.technical_detail or event.issue.message),
+            )
+        elif isinstance(event, FileFailed):
+            for issue in event.issues:
+                self.logger.warning(
+                    "Operation %s: %s %s: %s", event.operation_id, event.source_path.name,
+                    issue.code.value, redact_sensitive_text(issue.technical_detail or issue.message),
+                )
 
         if isinstance(operation_id, str):
             # An explicit allow-list keeps future event fields (including any

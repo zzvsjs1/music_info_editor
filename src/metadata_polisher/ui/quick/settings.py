@@ -8,6 +8,7 @@ from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 from metadata_polisher.application.provider_connection import ProviderConnectionResult, test_provider_connection
 from metadata_polisher.execution.cancellation import CancellationToken
 from metadata_polisher.execution.events import OperationEventSink
+from metadata_polisher.infrastructure.logging_setup import redact_sensitive_text
 from metadata_polisher.infrastructure.session_credentials import CredentialSnapshot
 from metadata_polisher.infrastructure.settings import (
     AppSettings,
@@ -38,21 +39,22 @@ if TYPE_CHECKING:
 # Keep the complete workflow reference alongside the settings facade so the
 # help window and preferences describe the same review and writing boundaries.
 HELP_TEXT = """
-<h2>Review first, write when ready</h2>
+<h2>Review and apply changes</h2>
 <ol>
-<li>Choose a folder and an album, then highlight the tracks to review.</li>
-<li>Open Metadata review. Select a field; double-click its Final value
-or press F2 to enter a correction. Show full values opens copyable details.</li>
-<li>Keep existing preserves each file's value. Use proposed uses each
-file's own suggestion. Edit deliberately shares your entry across selected fields.</li>
+<li>Browse to your music folder, or enter its path and press Enter to scan it.</li>
+<li>Click an album to see its tracks. Double-click it or press Enter to move into the track list.
+Click a track to select it. Double-click a track or press Enter to open Metadata review.</li>
+<li>Select a field. Press Enter to read and copy full values.
+Double-click its Final value or press F2 to edit it.</li>
+<li>Keep existing preserves each file's value. Use proposed takes each file's own suggestion.
+Edit applies your entry to all highlighted fields in the review scope.</li>
 <li>Clear removes the selected fields. Accept safe suggestions only fills
 missing values with an unambiguous, high-confidence supported suggestion.</li>
 <li>Review filename suggestions separately. Use Add selected files for the
 files you want to change, then Review &amp; Apply and inspect the final summary.</li>
 </ol>
-<p><b>Only Apply changes in the final confirmation writes files.</b>
-Highlighting, reviewing metadata and choosing filenames do not add files
-to Changes to apply. Undo review changes pending decisions, not completed writes.</p>
+<p><b>Choose Apply changes in the final confirmation to write the files.</b>
+Until then, use Undo review to reverse a pending review decision.</p>
 <h3>Review scope</h3>
 <p>Selected files means the highlighted tracks. Current group, Included files
 and All library files can contain tracks outside the visible table.
@@ -72,8 +74,11 @@ their files. Metadata review fields keep their fixed order.</p>
 Narrow review tables show Field, Final and Status first; scroll for the original
 and proposed values or open Show full values.</p>
 <h3>Keyboard reference</h3>
-<p>Ctrl+O: choose folder<br>F5 or Enter in folder: rescan<br>
+<p>Ctrl+O: choose folder<br>F5 or Enter in the folder path: scan the folder<br>
+Ctrl+click: toggle a row<br>Shift+click or Shift+Up/Down: select a range<br>
+Ctrl+Shift+Up/Down: add a range to the selection<br>
 Ctrl+A in tracks: select all displayed tracks<br>Ctrl+Shift+A: clear highlighting<br>
+Space in tracks: toggle inclusion in the write batch<br>
 Left / Right in a table: reveal columns<br>Menu or Shift+F10: column settings<br>
 Enter on a track or Ctrl+E: open review<br>F2 on a field: manual value<br>
 Alt+Left / Alt+Right: previous / next track<br>Ctrl+Z in review: undo review<br>
@@ -104,7 +109,7 @@ class QuickSettings(QObject):
         self._credential_snapshot = CredentialSnapshot(0, None)
         self._error = ""
         self._field_errors: dict[str, str] = {}
-        self._test_status = "Not tested in this dialogue."
+        self._test_status = ""
         self._test_operation: str | None = None
         self._test_provider: str | None = None
         self._load_draft(self._original)
@@ -194,8 +199,8 @@ class QuickSettings(QObject):
 
         try:
             self._file_snapshot = self._disk_snapshot()
-        except OSError:
-            self._host.set_status("Settings could not be opened because the settings file could not be read.")
+        except OSError as error:
+            self._host.set_status(f"Could not read the settings file. {error}")
             return False
 
         self._original = self._host.app_settings
@@ -243,7 +248,7 @@ class QuickSettings(QObject):
                     self._field_errors.pop(field, None)
 
         if name in {"providerId", "networkMode", "proxyHost", "proxyPort"}:
-            self._test_status = "Not tested with this route and credentials."
+            self._test_status = ""
 
         self.changed.emit()
 
@@ -265,7 +270,7 @@ class QuickSettings(QObject):
     def setCredentials(self, username: str, password: str) -> None:
         if self._can_change():
             self._username, self._password = username, password
-            self._test_status = "Not tested with this route and credentials."
+            self._test_status = ""
             self.changed.emit()
 
     @Slot(str, str)
@@ -429,7 +434,7 @@ class QuickSettings(QObject):
     def _install_credentials(self, snapshot: CredentialSnapshot) -> None:
         self._credential_snapshot = snapshot
         self._username, self._password = snapshot.proxy_auth or ("", "")
-        self._test_status = "Not tested with this route and credentials."
+        self._test_status = ""
 
     def _lookup(self) -> QuickLookup:
         # PySide's descriptor annotation describes Property itself rather than
@@ -512,7 +517,7 @@ class QuickSettings(QObject):
     def cancelTest(self) -> None:
         if self._test_operation is not None:
             self._host.cancelScan()
-            self._test_status = "Cancelling test; waiting for the bounded request to finish…"
+            self._test_status = "Cancelling the connection test…"
             self.changed.emit()
 
     @Slot(str, object)
@@ -522,14 +527,13 @@ class QuickSettings(QObject):
             or result.operation_id != operation_id
             or result.provider_id != self._test_provider
         ):
-            self._finish_test(operation_id, "Provider test failed; no successful connection was established.")
+            self._finish_test(operation_id, "The connection test returned an unexpected result. Try the test again.")
             return
 
         message = (
-            f"{provider_label(result.provider_id)} connection test passed; "
-            "the adapter returned a valid catalogue response."
+            f"{provider_label(result.provider_id)} connection test passed."
             if result.issue is None
-            else f"{result.issue.code.value}: {result.issue.message}"
+            else f"{provider_label(result.provider_id)}: {result.issue.message}"
         )
         self._finish_test(operation_id, message)
 
@@ -538,8 +542,8 @@ class QuickSettings(QObject):
         self._finish_test(operation_id, "Provider test cancelled.")
 
     @Slot(str, object)
-    def _test_failed(self, operation_id: str, _error: object) -> None:
-        self._finish_test(operation_id, "Provider test failed; no successful connection was established.")
+    def _test_failed(self, operation_id: str, error: object) -> None:
+        self._finish_test(operation_id, f"Connection test failed. {error}")
 
     def _finish_test(self, operation_id: str, message: str) -> None:
         if operation_id != self._test_operation:
@@ -548,7 +552,7 @@ class QuickSettings(QObject):
         self._test_operation = self._test_provider = None
         self._expected_state = self._host.session_state
         self._lookup().finish_connection_test()
-        self._test_status = message
+        self._test_status = redact_sensitive_text(message)
         self.changed.emit()
 
     @Slot(QUrl, result=str)

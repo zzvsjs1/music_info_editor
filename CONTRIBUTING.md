@@ -6,7 +6,7 @@ For a substantial feature or a change to metadata behaviour, open an issue descr
 
 ## Development setup
 
-Use conventional, GIL-enabled CPython 3.14 on Windows. Later Python versions are permitted by the package metadata but need their own verification. From a fresh clone, run these PowerShell commands in the repository root:
+Use conventional, GIL-enabled CPython 3.14 on Windows. Later Python versions are permitted by the package metadata but need their own verification. From the root of a fresh checkout or unpacked source archive, run the following in PowerShell.
 
 ```powershell
 py -3.14 -m venv .venv
@@ -18,17 +18,9 @@ If the checkout already has a working `.venv`, reuse it and skip the creation co
 
 ## Making a change
 
-Read the existing implementation and relevant tests before editing. Keep application rules in typed services and immutable state transformations; QML controls should present state and dispatch user actions. Keep matching decisions explainable, preserve field provenance, and require a validated `ChangeSet` before writing.
+The desktop interface lives in `src/metadata_polisher/ui/quick/`. Its QML controls display state and send commands to the Python services. For changes to selection, matching, file writing or recovery, consult the [project notes for coding agents](AGENTS.md).
 
-The sole interface lives in `src/metadata_polisher/ui/quick/`. `qml/Main.qml` composes the library and separate `ReviewWindow.qml`; `DataTable.qml` presents shared Qt models, while `RowTable.qml` handles smaller stable-ID projections. Keep file/field highlighting, review decisions and write inclusion separate. `UiMetrics.qml` holds presentation defaults. Font metrics set table heights, wrapping action rows retain readable labels, and diagnostics use bounded, selectable text with actions outside their scroll areas.
-
-`backend.py` owns immutable session state and stable-ID review commands. Lookup, Apply, library, settings, diagnostics and preference facades coordinate the shared Python services. `ui/models/`, `ui/qt_bridge.py` and `ui/pending_work.py` remain shared presentation helpers; they do not depend on Qt Widgets. `WindowPreferences.qml` and `preferences.py` retain portable preference keys from earlier releases. Keep domain rules in shared services and presentation in QML.
-
-Run `python scripts/test_offscreen.py -q` with the repository virtual environment for the offline suite. The runner creates a `QGuiApplication`, a 1920×1080 virtual screen and an installed Segoe UI font, using Fusion and software rendering. The `tests/ui/test_quick*.py` suites cover service boundaries, real scene interactions and disposable-media Apply verification; `tests/ui/helpers.py` supplies synthetic sessions and controllable workers. Use actual delegate geometry for clicks instead of fixed checkbox coordinates.
-
-`scripts/render_qml.py` renders synthetic populated windows under `build/qml-preview/`. Its default Fusion/offscreen mode checks layout. Use `--style native --platform windows` for native appearance, and `--font 14 --width 840` to inspect enlarged text in a narrow window. Native theme textures do not render correctly on the offscreen platform, so that combination is rejected. Native focus, scaling and packaged rendering also need Windows checks. Bind secondary-window shortcuts to their visible, active window.
-
-Include QML components in package data and the portable bundle. After QML or packaging changes, exercise `MetadataPolisher.exe` through scan, review and explicit disposable-media Apply; Python tests alone do not establish that frozen Qt modules and scenes are complete. The historical `--qml` switch is accepted only as a compatibility alias. Do not restore a parallel Widgets composition.
+To preview a layout with sample data, run `scripts/render_qml.py` with the project’s Python interpreter. It saves screenshots under `build/qml-preview/`. Use `--font 14 --width 840` to check larger text in a narrow window, or `--style native --platform windows` to inspect Windows controls.
 
 For a behaviour change, first add a focused test that demonstrates the bug or missing behaviour. Confirm that it fails for the expected reason, implement the change, then run the relevant checks. Use clear English comments for non-obvious logic and UK English in new documentation and user-facing text. Separate logical blocks with a blank line where it improves readability.
 
@@ -50,11 +42,55 @@ The offscreen runner keeps layout checks independent of the host display size. T
 
 The default pytest configuration excludes `live` and `localmedia` tests. It must work without a music library, provider credentials or network access. Use fake transports for provider behaviour tests.
 
-Optional local-media checks use files under the ignored `musics/` directory, copy selected samples into temporary storage and write only to those copies. See the [README test instructions](README.md#tests) before opting in. Keep your own backups when testing the application manually and use disposable copies, never your only music-library copy.
+### Optional checks
 
-Live provider checks make real requests and require explicit opt-in. Test only the selected provider, respect its access restrictions, and never bypass a browser challenge. Distinguish offline fixture results, live success, access denial, failures and skipped checks in the pull request.
+**Local media.** Place private samples under the ignored `musics/` directory. The format checks select one sample per available format, edit temporary copies, and verify the source hash, size and modification time afterwards. Missing samples are skipped. See the [audio fixture notes](tests/fixtures/audio/README.md) for what the offline suite covers.
 
-For a packaging change, also run the Windows build and exercise the resulting application using the [README build instructions](README.md#development-and-portable-build). Record what you actually checked; an executable starting successfully does not verify scanning, review or writing.
+```powershell
+& .\.venv\Scripts\python.exe -m pytest -m localmedia -q -rs
+```
+
+**Live lookups.** Run only the block for the provider you intend to contact. For MusicBrainz, replace the example address with your contact email or public project URL.
+
+```powershell
+$env:METADATA_POLISHER_MUSICBRAINZ_CONTACT = "you@example.org"
+$env:METADATA_POLISHER_MUSICBRAINZ_LIVE = "1"
+& .\.venv\Scripts\python.exe -m pytest tests/live/test_musicbrainz_live.py -m live -q -rs
+```
+
+For VGMdb, run this block on its own.
+
+```powershell
+$env:METADATA_POLISHER_VGMDB_LIVE = "1"
+& .\.venv\Scripts\python.exe -m pytest tests/live/test_vgmdb_live.py -m live -q -rs
+```
+
+Respect provider access restrictions. Report access denials, skips and failures separately from successful live requests and offline test results.
+
+## Portable Windows build
+
+Close any running copy of the packaged application. From the project root, use the virtual environment created during [development setup](#development-setup).
+
+```powershell
+& .\.venv\Scripts\python.exe scripts/build_windows.py
+```
+
+The [build script](scripts/build_windows.py) uses the [PyInstaller specification](packaging/metadata-polisher.spec) to stage a fresh build, then preserves `settings.json`, `logs/` and `reports/` when replacing the output folder. Keep the entire `dist/MetadataPolisher/` folder together, including `_internal/`. For QML or packaging changes, run `dist/MetadataPolisher/MetadataPolisher.exe`, scan disposable media, review a change, confirm **Apply changes**, and check the saved result.
+
+The first public release is intended to ship as source. Before redistributing a frozen build, prepare a clean folder free of personal settings, logs, reports and music, and complete the [binary redistribution requirements](THIRD_PARTY_NOTICES.md#requirements-before-distributing-a-frozen-application).
+
+## Source and wheel releases
+
+With the development dependencies installed, build both Python archives and check their contents.
+
+```powershell
+& .\.venv\Scripts\python.exe -m build --outdir dist/open-source
+& .\.venv\Scripts\python.exe scripts/check_release.py dist/open-source
+```
+
+The source archive includes application code, tests, synthetic fixtures and contributor guidance. The wheel contains the Python package and licence notices and requires a separately installed Python runtime and dependencies. The [release checker](scripts/check_release.py) checks archive paths, expected files and licence metadata. Review the actual contents for sensitive material before publishing.
+
+For a first public repository, start from the reviewed source archive. Publishing existing Git history requires a separate review of commits and refs for private files. The [Windows CI workflow](.github/workflows/ci.yml) builds and checks the Python archives. Publication is a separate step.
 
 ## Submitting a pull request
 

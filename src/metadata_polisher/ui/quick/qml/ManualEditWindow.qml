@@ -44,8 +44,10 @@ ApplicationWindow {
             Qt.callLater(function() {
                 if (editor.positionValue) {
                     numberSpin.forceActiveFocus();
+                    numberSpin.contentItem.selectAll();
                 } else {
                     editValue.forceActiveFocus();
+                    editValue.selectAll();
                 }
             });
         }
@@ -56,15 +58,15 @@ ApplicationWindow {
     function acceptValue() {
         if (positionValue) {
             // A window shortcut runs before SpinBox commits its focused text.
-            // Read both drafts explicitly so Return and clicking OK save the
-            // same number, including the zero sentinel used for Missing.
+            // Read both drafts explicitly so Return and clicking Use value save the
+            // same number, including the zero sentinel for a preserved component.
             const number = numberSpin.valueFromText(numberSpin.contentItem.text, numberSpin.locale);
             const total = totalSpin.valueFromText(totalSpin.contentItem.text, totalSpin.locale);
 
             if (!Number.isInteger(number) || !Number.isInteger(total)
                     || number < numberSpin.from || number > numberSpin.to
                     || total < totalSpin.from || total > totalSpin.to) {
-                inputError = "Enter a whole number in each input, or use Missing.";
+                inputError = "Enter whole numbers. Use 0 to keep the existing number or total.";
                 return;
             }
 
@@ -87,10 +89,16 @@ ApplicationWindow {
         onActivated: backend.cancelEdit()
     }
 
-    // Text areas retain Return for line breaks. Position controls can accept
-    // with Return, while Ctrl+Return also accepts a multiline text value.
+    // Text areas retain Return for line breaks. Limit ordinary Return to the
+    // position inputs so it cannot accept an edit while Cancel has focus.
     Shortcut {
-        sequences: editor.positionValue ? ["Return", "Enter", "Ctrl+Return"] : ["Ctrl+Return"]
+        sequences: ["Return", "Enter"]
+        enabled: editor.visible && editor.positionValue && (numberSpin.activeFocus || totalSpin.activeFocus)
+        onActivated: editor.acceptValue()
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Return", "Ctrl+Enter"]
         enabled: editor.visible
         onActivated: editor.acceptValue()
     }
@@ -134,10 +142,10 @@ ApplicationWindow {
                         editable: true
                         Accessible.name: "Number"
                         textFromValue: function(value, locale) {
-                            return value === 0 ? "Missing" : value.toLocaleString(locale, "f", 0);
+                            return value === 0 ? "Keep existing" : value.toLocaleString(locale, "f", 0);
                         }
                         valueFromText: function(text, locale) {
-                            return text.trim().toLowerCase() === "missing" ? 0 : Number.fromLocaleString(locale, text);
+                            return text === "Keep existing" ? 0 : Number.fromLocaleString(locale, text);
                         }
                     }
 
@@ -155,10 +163,10 @@ ApplicationWindow {
                         editable: true
                         Accessible.name: "Total"
                         textFromValue: function(value, locale) {
-                            return value === 0 ? "Missing" : value.toLocaleString(locale, "f", 0);
+                            return value === 0 ? "Keep existing" : value.toLocaleString(locale, "f", 0);
                         }
                         valueFromText: function(text, locale) {
-                            return text.trim().toLowerCase() === "missing" ? 0 : Number.fromLocaleString(locale, text);
+                            return text === "Keep existing" ? 0 : Number.fromLocaleString(locale, text);
                         }
                     }
                 }
@@ -170,7 +178,7 @@ ApplicationWindow {
 
                     Label {
                         Layout.alignment: Qt.AlignTop
-                        text: backend.editType === "list" ? "Values\n(one per line)" : "Value"
+                        text: backend.editType === "list" ? "Values" : "Value"
                     }
 
                     AppScrollView {
@@ -186,6 +194,7 @@ ApplicationWindow {
                             leftPadding: 5
                             rightPadding: 5
                             selectByMouse: true
+                            textFormat: TextEdit.PlainText
                             wrapMode: TextEdit.WrapAnywhere
                             Accessible.name: "New value for " + backend.editLabel
                         }
@@ -228,7 +237,9 @@ ApplicationWindow {
 
             ActionButton {
                 objectName: "saveEditButton"
-                text: "OK"
+                text: "Use value"
+                ToolTip.visible: hovered
+                ToolTip.text: "Use this value in review (Ctrl+Enter)."
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
 

@@ -40,7 +40,7 @@ Item {
     ApplicationWindow {
         id: summaryWindow
         objectName: "applySummaryWindow"
-        title: "Review Apply changes"
+        title: "Review changes before writing"
         width: Math.min(700, Screen.desktopAvailableWidth - metrics.screenHorizontalMargin)
         height: Math.min(620, Screen.desktopAvailableHeight - metrics.screenVerticalMargin)
         minimumWidth: 600
@@ -78,7 +78,7 @@ Item {
 
             SummaryText {
                 text: owner.apply.summaryText
-                Layout.preferredHeight: summaryWindow.height / 3
+                fitContent: true
             }
 
             RowTable {
@@ -102,7 +102,7 @@ Item {
 
             Label {
                 Layout.fillWidth: true
-                text: "Only Apply changes starts writing the files in this summary."
+                text: "Select a file to inspect its tag changes. Apply changes writes the listed changes to disk."
                 wrapMode: Text.WordWrap
             }
 
@@ -155,7 +155,10 @@ Item {
             anchors.margins: metrics.windowMargin
             spacing: metrics.spacing
 
-            SummaryText { text: owner.apply.resultsText }
+            SummaryText {
+                text: owner.apply.resultsText
+                fitContent: true
+            }
 
             RowTable {
                 objectName: "applyResultsTable"
@@ -169,7 +172,7 @@ Item {
                 scaleColumnWidths: true
                 columns: [
                     {key: "file", label: "File", width: 230},
-                    {key: "status", label: "Result", width: 140},
+                    {key: "statusLabel", label: "Result", width: 140},
                     {key: "final", label: "Final path", width: 300},
                     {key: "details", label: "Details", width: 400}
                 ]
@@ -214,7 +217,8 @@ Item {
 
             Label {
                 Layout.fillWidth: true
-                text: "Choose filenames to prepare. The next screen reviews all changes to apply, including metadata."
+                text: owner.apply.renameRemovesOnly ? "The files will keep their current names."
+                                                  : "Tick the files to rename. The next step shows all included files and tag changes."
                 wrapMode: Text.WordWrap
             }
 
@@ -237,7 +241,7 @@ Item {
                 gridLines: true
                 columns: [
                     {key: "included", label: "Rename", width: 65, checkable: true},
-                    {key: "current", label: "Current filename", width: 230},
+                    {key: "current", label: "Current file", width: 230},
                     {key: "preview", label: "Preview", width: 290},
                     {key: "validation", label: "Validation", width: 300}
                 ]
@@ -256,7 +260,7 @@ Item {
 
                 ActionButton {
                     objectName: "acceptRenameButton"
-                    text: "Include chosen files and review changes…"
+                    text: owner.apply.renameRemovesOnly ? "Remove rename choices" : "Include chosen files and review changes…"
                     enabled: owner.apply.renameCanAccept
                     onClicked: owner.apply.acceptRename()
                 }
@@ -294,7 +298,8 @@ Item {
 
             Label {
                 Layout.fillWidth: true
-                text: owner.apply.previewRows.length + " files being reviewed. No files are being changed."
+                text: owner.apply.previewRows.length === 1 ? "1 file in review"
+                                                          : owner.apply.previewRows.length + " files in review"
                 wrapMode: Text.WordWrap
             }
 
@@ -306,7 +311,7 @@ Item {
                 layout: backend.layoutUi
                 preferenceKey: "RenamePreviewDialog/renamePreviewTable"
                 columns: [
-                    {key: "current", label: "Current filename", width: 240},
+                    {key: "current", label: "Current file", width: 240},
                     {key: "preview", label: "Proposed filename", width: 300},
                     {key: "decision", label: "Decision", width: 130},
                     {key: "validation", label: "Validation", width: 300}

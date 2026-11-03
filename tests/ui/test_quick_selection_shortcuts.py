@@ -1,17 +1,20 @@
 """Album and field shortcuts change highlighting without authorising writes."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPointF, Qt
 from PySide6.QtQuick import QQuickItem, QQuickWindow
 from PySide6.QtTest import QTest
 
+from metadata_polisher.domain.media import UnsupportedMediaFile
 from metadata_polisher.domain.metadata import MetadataField
-from metadata_polisher.session.state import GroupSelection, SessionState
+from metadata_polisher.session.state import GroupSelection, SessionState, mark_groups_requires_rescan
 from metadata_polisher.ui.quick.application import create_quick_engine
 from metadata_polisher.ui.quick.backend import QuickBackend
 from tests.ui.helpers import ControlledExecutor, make_group
+from tests.ui.test_quick_table_interaction import visual_items
 
 
 @pytest.fixture
@@ -99,6 +102,51 @@ def test_album_clear_selection_keeps_current_files_and_disables_group_scope(sele
     assert not backend.lookupUi.canFind
     assert backend.includedFileIds == included
     assert backend.session_state is original
+
+
+@pytest.mark.parametrize("gesture", ["double-click", "enter"])
+def test_activating_an_album_focuses_its_tracks(selection_scene, qtbot, gesture):
+    window, backend = selection_scene
+    included = backend.includedFileIds
+    albums = window.findChild(QQuickItem, "groupTable")
+    files = window.findChild(QQuickItem, "fileTable")
+    if gesture == "double-click":
+        cells = list(visual_items(albums))
+        target = next(cell for cell in cells if cell.property("stableId") == "middle" and cell.property("column") == 0)
+        point = target.mapToScene(QPointF(target.width() / 2, target.height() / 2)).toPoint()
+        QTest.mouseDClick(window, Qt.MouseButton.LeftButton, pos=point)
+    else:
+        backend.selectGroup("middle")
+        albums.forceActiveFocus()
+        QTest.keyClick(window, Qt.Key.Key_Return)
+
+    assert backend.groupId == "middle"
+    assert files.hasActiveFocus()
+    assert backend.selectedFileIds == ["file-middle"]
+    assert not backend.reviewVisible
+    assert backend.includedFileIds == included
+
+
+@pytest.mark.parametrize("collection", ["stale", "unsupported"])
+def test_library_only_offers_inclusion_for_checkable_rows(selection_scene, qtbot, collection):
+    window, backend = selection_scene
+    if collection == "unsupported":
+        state = replace(backend.session_state, unsupported_files=(UnsupportedMediaFile(Path("library/extra.opus")),))
+        backend.set_state(state)
+        backend.selectGroup("@unsupported")
+    else:
+        backend.set_state(mark_groups_requires_rescan(backend.session_state, ("alpha",)))
+        backend.set_included_file_ids(frozenset())
+
+    table = window.findChild(QQuickItem, "fileTable")
+    view = next(child for child in table.findChildren(QQuickItem)
+                if child.metaObject().className() == "QQuickTableView")
+    qtbot.waitUntil(lambda: view.property("rows") > 0)
+    assert not any(item.inherits("QQuickCheckBox") and item.isVisible() for item in visual_items(table))
+    assert not window.findChild(QQuickItem, "includeSelectedButton").isEnabled()
+    before = backend.includedFileIds
+    backend.includeSelection(True)
+    assert backend.includedFileIds == before
 
 
 def test_review_select_all_keeps_current_field_anchor_and_write_membership(selection_scene, qtbot):

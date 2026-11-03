@@ -152,9 +152,9 @@ def test_batch_progress_does_not_describe_a_single_focused_file(presentation_bac
 
 def test_review_feedback_omits_duplicate_scan_success_but_keeps_warnings(presentation_backend):
     backend = presentation_backend
-    backend.set_status("Scanned 2 supported files in 1 albums.")
+    backend.set_status(backend.scanSummary)
     assert backend.reviewMessage == ""
-    backend.set_status("Scanned 2 supported files in 1 albums.\nSettings could not be saved.")
+    backend.set_status(backend.scanSummary + "\nSettings could not be saved.")
     assert backend.reviewMessage == "Settings could not be saved."
     backend.set_status("A review change was undone.")
     assert backend.reviewMessage == "A review change was undone."

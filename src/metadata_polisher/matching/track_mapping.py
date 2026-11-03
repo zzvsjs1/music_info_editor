@@ -12,7 +12,7 @@ from rapidfuzz.fuzz import ratio
 from metadata_polisher.domain.matching import ProviderTrack, ReleaseCandidate
 from metadata_polisher.domain.media import LocalMediaFile
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField, Position
-from metadata_polisher.matching.evidence import effective_local_title
+from metadata_polisher.matching.evidence import INCOMPLETE_LISTING_MESSAGE, effective_local_title
 from metadata_polisher.matching.normalisation import normalise_for_matching
 from metadata_polisher.matching.policy import DEFAULT_MATCHING_POLICY, SCORE_DECIMAL_PLACES, MatchingPolicy
 from metadata_polisher.matching.release_scoring import (
@@ -1103,7 +1103,7 @@ def _summary_evidence(
             _evidence(
                 MatchReasonCode.TRACK_MAPPING_AMBIGUOUS,
                 0.0,
-                f"{len(ambiguous)} local track(s) had unresolved competition for track identity.",
+                f"Files with uncertain track assignments: {len(ambiguous)}. Check them in Map tracks.",
             ),
         )
     else:
@@ -1113,20 +1113,20 @@ def _summary_evidence(
         status = _evidence(
             MatchReasonCode.TRACK_MAPPING_COMPLETE,
             0.0,
-            f"All {len(mappings)} supplied local/provider track pair(s) were mapped.",
+            f"Matched all {len(mappings)} files to the listed tracks.",
         )
     elif mappings:
         status = _evidence(
             MatchReasonCode.TRACK_MAPPING_PARTIAL,
             0.0,
-            f"Mapped {len(mappings)} pair(s); {len(unmatched_local)} local and "
-            f"{len(unmatched_provider)} provider track(s) remain unmatched.",
+            f"Matched pairs: {len(mappings)}. Unmatched files: {len(unmatched_local)}. "
+            f"Unmatched provider tracks: {len(unmatched_provider)}. Check the assignments in Map tracks.",
         )
     else:
         status = _evidence(
             MatchReasonCode.TRACK_MAPPING_INSUFFICIENT_EVIDENCE,
             0.0,
-            "No local/provider pair had enough unambiguous substantive evidence.",
+            "The app could not match any file to a track automatically. Use Map tracks to assign them.",
         )
 
     if listing_complete:
@@ -1141,8 +1141,7 @@ def _summary_evidence(
         _evidence(
             MatchReasonCode.PROVIDER_LIST_INCOMPLETE,
             0.0,
-            "The selected track listing or release medium listing is incomplete; "
-            "mapping supplied rows does not establish complete release identity.",
+            INCOMPLETE_LISTING_MESSAGE,
         ),
     )
 
