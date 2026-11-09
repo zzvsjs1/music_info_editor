@@ -888,6 +888,8 @@ def mark_groups_requires_rescan(
     group_ids: Sequence[str],
 ) -> SessionState:
     """Invalidate derived data only for groups whose files changed on disk."""
+    from metadata_polisher.session.review_previews import revalidate_review_destinations
+
     if not isinstance(state, SessionState):
         raise TypeError("state must be a SessionState")
 
@@ -936,11 +938,12 @@ def mark_groups_requires_rescan(
     if not changed:
         return state
 
-    return replace(
+    updated = replace(
         state,
         groups=tuple(updated_groups),
         revision=state.revision + 1,
     )
+    return revalidate_review_destinations(updated)
 
 
 def begin_operation(
@@ -1337,6 +1340,8 @@ def _reconcile_apply_filesystem_effects(
     *,
     accept_refresh: bool,
 ) -> SessionState:
+    from metadata_polisher.session.review_previews import revalidate_review_destinations
+
     # Match both stable file ID and original path: an old result must not be
     # attached to a different source merely because an identifier was reused.
     changed = {
@@ -1429,7 +1434,10 @@ def _reconcile_apply_filesystem_effects(
             revision=state.revision + int(refreshed_any),
         )
 
-    return mark_groups_requires_rescan(updated, uncertain_groups) if uncertain_groups else updated
+    if uncertain_groups:
+        return mark_groups_requires_rescan(updated, uncertain_groups)
+
+    return revalidate_review_destinations(updated)
 
 
 def apply_batch_result(
@@ -1491,6 +1499,8 @@ def apply_group_result(
     envelope: GroupResultEnvelope,
 ) -> StateApplicationResult:
     """Replace one whole group while tolerating changes to unrelated groups."""
+    from metadata_polisher.session.review_previews import revalidate_review_destinations
+
     if not isinstance(state, SessionState):
         raise TypeError("state must be a SessionState")
 
@@ -1540,7 +1550,7 @@ def apply_group_result(
     )
 
     return StateApplicationResult(
-        state=updated,
+        state=revalidate_review_destinations(updated),
         status=ResultApplicationStatus.APPLIED,
         reason=None,
     )

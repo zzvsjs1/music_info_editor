@@ -170,6 +170,37 @@ def test_real_track_restart_with_real_disc_change_is_strong_split_evidence() -> 
     assert result.warnings == ()
 
 
+@pytest.mark.parametrize("positions", [
+    ((1, 2), (2, 1), (1, 1), (2, 2)),
+    ((1, 1), (2, 1), (1, 2), (2, 2)),
+])
+def test_interleaved_filenames_keep_files_on_their_tagged_discs(positions: tuple[tuple[int, int], ...]) -> None:
+    files = tuple(make_media_file(
+        f"library/Set/{name}.flac", album="Set", disc_number=disc, track_number=track,
+    ) for name, (disc, track) in zip("ABCD", positions, strict=True))
+
+    result = group_scanned_files(files)
+
+    assert tuple(group.files for group in result.groups) == tuple(
+        tuple(file for file in files if file.read_result.metadata.disc.number == disc) for disc in (1, 2)
+    )
+    assert result.warnings == ()
+
+
+def test_incomplete_disc_tags_warn_without_assigning_unknown_file_to_a_disc() -> None:
+    files = (
+        make_media_file("library/Set/A.flac", album="Set", disc_number=1, track_number=1),
+        make_media_file("library/Set/B.flac", album="Set", disc_number=2, track_number=1),
+        make_media_file("library/Set/C.flac", album="Set", track_number=2),
+    )
+
+    result = group_scanned_files(files)
+
+    assert tuple(group.files for group in result.groups) == (files,)
+    assert len(result.warnings) == 1
+    assert result.warnings[0].affected_file_ids == tuple(file.file_id for file in files)
+
+
 # Even matching disc and track filename prefixes remain weak evidence;
 # auto-splitting requires the corresponding readable real tags.
 def test_filename_hint_restart_is_warning_only_and_never_strong_split_evidence() -> None:

@@ -1020,6 +1020,7 @@ def rank_release_candidates(
         )
         for release in validated_releases
         for medium_index, medium in enumerate(release.media)
+        if not medium.is_data_only
     ]
     entries.sort(key=_ranking_key)
     ambiguous = False

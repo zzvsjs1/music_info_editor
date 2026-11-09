@@ -23,7 +23,10 @@ def test_sanitising_a_stem_does_not_change_the_extension() -> None:
     assert result.sanitised_extension == ".FLAC"
 
 
-@pytest.mark.parametrize("name", ("CON", "con.mp3", "PRN.flac", "AUX.wav", "NUL.m4a", "COM1.tak", "LPT9.mp3"))
+@pytest.mark.parametrize("name", (
+    "CON", "con.mp3", "PRN.flac", "AUX.wav", "NUL.m4a", "COM1.tak", "LPT9.mp3",
+    "COM¹.flac", "lpt².wav", "COM³.tak", "ConIn$.mp3", "ConOut$.flac",
+))
 def test_reserved_device_name_is_repaired_even_when_it_has_an_extension(name: str) -> None:
     result = sanitise_windows_filename(name)
 

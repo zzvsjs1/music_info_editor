@@ -379,6 +379,23 @@ def test_language_reranking_retains_planned_destination_blockers() -> None:
         }
 
 
+def test_releasing_a_cross_group_destination_clears_the_other_groups_blocker():
+    first, second = make_source("a.flac"), make_source("b.flac")
+    state = make_local_session(first, second)
+    group = state.groups[0].group
+    state = replace(state, groups=(GroupState(replace(group, files=(first,))),
+                                   GroupState(replace(group, group_id="second", files=(second,)))))
+    settings = RenameSettings(template="%title%")
+    queued = apply_batch_review(state, BatchReviewCommand((first.file_id, second.file_id), (), state.revision,
+                                BatchReviewAction.INCLUDE_RENAMES), settings).state
+    released = apply_batch_review(queued, BatchReviewCommand((second.file_id,), (), queued.revision,
+                                  BatchReviewAction.KEEP_FILENAMES), settings).state
+
+    assert change_set(queued).status is ChangeSetStatus.BLOCKED
+    assert change_set(released).rename_change is not None
+    assert ChangeIssueCode.DESTINATION_COLLISION not in {issue.code for issue in change_set(released).validation.issues}
+
+
 @pytest.mark.parametrize("operation", ["field", "rename", "bulk"])
 @pytest.mark.parametrize("blocked_reason", ["busy", "rescan"])
 def test_review_transforms_reject_busy_or_stale_groups(operation: str, blocked_reason: str) -> None:

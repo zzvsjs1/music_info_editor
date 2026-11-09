@@ -34,6 +34,7 @@ class GroupingWarningReason(StrEnum):
 
     TRACK_NUMBER_RESTART_WITHOUT_STRONG_TAG_EVIDENCE = "TRACK_NUMBER_RESTART_WITHOUT_STRONG_TAG_EVIDENCE"
     MISSING_ALBUM_BESIDE_DISTINCT_ALBUM_TAGS = "MISSING_ALBUM_BESIDE_DISTINCT_ALBUM_TAGS"
+    MIXED_DISC_TAGS = "MIXED_DISC_TAGS"
 
 
 @dataclass(frozen=True)
@@ -221,59 +222,74 @@ def _first_track_restart(files: tuple[LocalMediaFile, ...]) -> tuple[str, str] |
     return None
 
 
-# A split requires two adjacent files with readable track AND disc tags,
-# a restart at track 1 and a change of positive disc number. A filename
-# hint or an isolated changed disc value cannot prove that boundary.
-def _is_strong_disc_boundary(previous: LocalMediaFile, current: LocalMediaFile) -> bool:
-    previous_states = previous.read_result.field_states
-    current_states = current.read_result.field_states
+def _readable_number(file: LocalMediaFile, field: MetadataField) -> int | None:
+    if file.read_result.field_states[field] is not FieldReadState.PRESENT:
+        return None
 
-    if (
-        previous_states[MetadataField.TRACK] is not FieldReadState.PRESENT
-        or current_states[MetadataField.TRACK] is not FieldReadState.PRESENT
-        or previous_states[MetadataField.DISC] is not FieldReadState.PRESENT
-        or current_states[MetadataField.DISC] is not FieldReadState.PRESENT
-    ):
-        return False
-
-    previous_track = previous.read_result.metadata.track.number
-    current_track = current.read_result.metadata.track.number
-    previous_disc = previous.read_result.metadata.disc.number
-    current_disc = current.read_result.metadata.disc.number
-
-    return (
-        previous_track is not None
-        and current_track is not None
-        and previous_disc is not None
-        and current_disc is not None
-        and previous_disc > 0
-        and current_disc > 0
-        and previous_track > 1
-        and current_track == 1
-        and previous_disc != current_disc
-    )
+    metadata = file.read_result.metadata
+    number = metadata.track.number if field is MetadataField.TRACK else metadata.disc.number
+    return number if number is not None and number > 0 else None
 
 
 def _split_at_strong_disc_boundaries(
     files: tuple[LocalMediaFile, ...],
 ) -> tuple[tuple[LocalMediaFile, ...], ...]:
-    boundary_indexes = tuple(
-        index for index in range(1, len(files)) if _is_strong_disc_boundary(files[index - 1], files[index])
-    )
+    by_disc: dict[int, list[LocalMediaFile]] = defaultdict(list)
+    track_numbers: dict[int, set[int]] = defaultdict(set)
+    for file in files:
+        disc = _readable_number(file, MetadataField.DISC)
+        if disc is None:
+            # Filename order cannot decide which of several discs owns a file.
+            return (files,)
 
-    if not boundary_indexes:
+        by_disc[disc].append(file)
+        track = _readable_number(file, MetadataField.TRACK)
+        if track is not None:
+            track_numbers[disc].add(track)
+
+    discs = sorted(by_disc)
+    # A changed disc tag alone is weak evidence. Keep the restart requirement:
+    # a later numbered track on the preceding disc, then track 1 on the next.
+    # Test it on the tagged discs themselves, independently of filename order.
+    if len(discs) < 2 or any(
+        max(track_numbers[previous], default=0) <= 1 or 1 not in track_numbers[current]
+        for previous, current in zip(discs, discs[1:], strict=False)
+    ):
         return (files,)
 
-    segments: list[tuple[LocalMediaFile, ...]] = []
-    start = 0
+    return tuple(tuple(by_disc[disc]) for disc in discs)
 
-    for boundary_index in boundary_indexes:
-        segments.append(files[start:boundary_index])
-        start = boundary_index
 
-    segments.append(files[start:])
+def _disc_group_warning(group: AlbumGroup) -> GroupingWarning | None:
+    discs = {_readable_number(file, MetadataField.DISC) for file in group.files}
+    if len(discs - {None}) > 1:
+        return GroupingWarning(
+            code=GroupingWarningCode.POSSIBLE_MULTIPLE_ALBUMS,
+            reason=GroupingWarningReason.MIXED_DISC_TAGS,
+            group_id=group.group_id,
+            affected_file_ids=tuple(file.file_id for file in group.files),
+            message="The disc tags disagree and do not establish every file's disc. Review the grouping.",
+        )
 
-    return tuple(segments)
+    if len(discs) == 1 and None not in discs:
+        # Unique tracks on one explicitly numbered disc can have arbitrary
+        # filenames. Their path order cannot establish a track-number restart.
+        tracks = {_readable_number(file, MetadataField.TRACK) for file in group.files}
+        if None not in tracks and len(tracks) == len(group.files):
+            return None
+
+    restart = _first_track_restart(group.files)
+    if restart is None:
+        return None
+
+    return GroupingWarning(
+        code=GroupingWarningCode.POSSIBLE_MULTIPLE_ALBUMS,
+        reason=GroupingWarningReason.TRACK_NUMBER_RESTART_WITHOUT_STRONG_TAG_EVIDENCE,
+        group_id=group.group_id,
+        affected_file_ids=restart,
+        message=("Track numbering restarts, but the tags do not provide enough "
+                 "evidence to split this directory automatically."),
+    )
 
 
 @dataclass(frozen=True)
@@ -420,20 +436,8 @@ def group_scanned_files(files: Iterable[LocalMediaFile]) -> GroupingResult:
                     )
                 )
 
-            restart = _first_track_restart(group.files)
-
-            if restart is not None:
-                warnings.append(
-                    GroupingWarning(
-                        code=GroupingWarningCode.POSSIBLE_MULTIPLE_ALBUMS,
-                        reason=(GroupingWarningReason.TRACK_NUMBER_RESTART_WITHOUT_STRONG_TAG_EVIDENCE),
-                        group_id=group.group_id,
-                        affected_file_ids=restart,
-                        message=(
-                            "Track numbering restarts, but the tags do not provide enough "
-                            "evidence to split this directory automatically."
-                        ),
-                    )
-                )
+            warning = _disc_group_warning(group)
+            if warning is not None:
+                warnings.append(warning)
 
     return GroupingResult(groups=tuple(groups), warnings=tuple(warnings))

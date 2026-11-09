@@ -234,6 +234,11 @@ class ReleaseMedium:
                 raise TypeError(f"{name} must be a bool")
 
     @property
+    def is_data_only(self) -> bool:
+        """An explicit zero audio-track count distinguishes a data disc from an unloaded listing."""
+        return self.has_data_tracks and self.declared_track_count == 0 and not self.tracks
+
+    @property
     def track_total(self) -> int | None:
         """Return only a supported complete-list total, independently of local files.
 

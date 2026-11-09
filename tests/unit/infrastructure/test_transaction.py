@@ -1,4 +1,5 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from metadata_polisher.application.changes import (
 from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import (
     FilenameHints,
+    FileVersion,
     LocalMediaFile,
     MediaReadResult,
     StreamInfo,
@@ -163,6 +165,9 @@ class FakeFileSystem:
         self.after_replace: Callable[[], None] | None = None
         self.after_move: Callable[[], None] | None = None
 
+    def is_writable_file(self, path: Path) -> bool:
+        return path in self.files
+
     def create_temporary_sibling(self, source: Path) -> Path:
         if "create_temporary" in self.faults:
             raise OSError("cannot create temporary file")
@@ -208,9 +213,17 @@ class FakeFileSystem:
         if self.after_move is not None:
             self.after_move()
 
-    def remove_file(self, path: Path) -> None:
+    @contextmanager
+    def pin_file(self, path: Path, *, allow_rename: bool = False) -> Iterator[FileVersion]:
+        payload = self.files[path]
+        yield (1, id(payload), len(payload), 0, 0)
+
+    def remove_file(self, path: Path, *, expected_version: FileVersion | None = None) -> None:
         if path == SOURCE_PATH and "remove_original" in self.faults:
             raise OSError("remove original failed")
+
+        if expected_version is not None and id(self.files.get(path)) != expected_version[1]:
+            raise OSError("file changed before cleanup")
 
         self.files.pop(path, None)
 

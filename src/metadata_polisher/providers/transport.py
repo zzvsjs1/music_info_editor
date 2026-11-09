@@ -2,6 +2,7 @@
 
 import math
 import ssl
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -115,8 +116,8 @@ class ProviderTransportErrorContext:
         if type(self.attempt_count) is not int:
             raise TypeError("attempt_count must be an integer")
 
-        if self.attempt_count <= 0:
-            raise ValueError("attempt_count must be greater than zero")
+        if self.attempt_count < 0:
+            raise ValueError("attempt_count cannot be negative")
 
         if self.status_code is not None:
             if type(self.status_code) is not int:
@@ -163,6 +164,7 @@ class ProviderRateLimit:
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     last_request_started_at: float | None = None
+    retry_not_before: float | None = None
 
 
 class ProviderTransport:
@@ -213,10 +215,15 @@ class ProviderTransport:
         params: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
         context: RequestContext | None = None,
+        access_challenge: Callable[[str], bool] | None = None,
     ) -> str:
         """Return decoded response text through the shared rate and retry policy."""
-        response, attempt_count = self._get_response(url, params=params, headers=headers, context=context)
+        response, attempt_count = self._get_response(
+            url, params=params, headers=headers, context=context, access_challenge=access_challenge,
+        )
+        return self._response_text(response, attempt_count)
 
+    def _response_text(self, response: httpx.Response, attempt_count: int) -> str:
         try:
             return response.text
         except (LookupError, UnicodeError):
@@ -233,13 +240,14 @@ class ProviderTransport:
         params: Mapping[str, str] | None,
         headers: Mapping[str, str] | None,
         context: RequestContext | None,
+        access_challenge: Callable[[str], bool] | None = None,
     ) -> tuple[httpx.Response, int]:
         """Apply the common request policy before format-specific decoding."""
         # The attempt budget includes the first request. Only explicitly handled
         # transient outcomes re-enter this loop; access failures stop immediately.
         for attempt_count in range(1, self._policy.max_attempts + 1):
             self._check_cancelled(context)
-            self._wait_for_request_start(context)
+            self._wait_for_request_start(context, attempts_made=attempt_count - 1)
             self._stage(context, "requesting_provider")
             response_or_error = self._send(url, params=params, headers=headers)
             # Synchronous HTTP cannot safely be force-killed. Its finite timeout
@@ -258,8 +266,24 @@ class ProviderTransport:
 
             response = response_or_error
 
+            # Some catalogue challenges use the same HTTP status as a
+            # transient outage. Identify them before spending a retry.
+            if (
+                access_challenge is not None
+                and (response.is_success or response.status_code == 503)
+                and access_challenge(self._response_text(response, attempt_count))
+            ):
+                raise self._error(
+                    ProviderErrorCode.ACCESS_DENIED, attempt_count=attempt_count, status_code=response.status_code,
+                )
+
             if response.status_code == 429:
                 retry_after, retry_after_is_within_bound = self._bounded_retry_after(response)
+                if retry_after is not None:
+                    deadline = self._monotonic() + retry_after
+                    with self._rate_limit.lock:
+                        previous = self._rate_limit.retry_not_before
+                        self._rate_limit.retry_not_before = deadline if previous is None else max(previous, deadline)
 
                 # Do not cap a long server delay and retry too early. Decline
                 # the retry when respecting the delay would exceed our wait bound.
@@ -309,27 +333,33 @@ class ProviderTransport:
         # this unreachable, but retaining the guard keeps the control flow explicit.
         raise AssertionError("Transport attempt loop ended unexpectedly")
 
-    def _wait_for_request_start(self, context: RequestContext | None) -> None:
-        # Serialising only the start-time calculation makes one shared transport
-        # preserve its provider's polite request interval across worker threads.
-        while not self._rate_limit.lock.acquire(timeout=0.1):
+    def _wait_for_request_start(self, context: RequestContext | None, *, attempts_made: int) -> None:
+        # Recheck after waiting: another route may have just received a 429.
+        # No caller holds the provider lock while sleeping.
+        while True:
             self._check_cancelled(context)
+            if not self._rate_limit.lock.acquire(timeout=0.1):
+                continue
+            try:
+                now = self._monotonic()
+                deadline = self._rate_limit.retry_not_before
+                remaining = deadline - now if deadline is not None else 0.0
+                if remaining > self._policy.max_retry_after_seconds:
+                    raise self._error(
+                        ProviderErrorCode.RATE_LIMITED, attempt_count=attempts_made, retry_after_seconds=remaining,
+                    )
 
-        try:
-            now = self._monotonic()
+                last_start = self._rate_limit.last_request_started_at
+                if last_start is not None:
+                    remaining = max(remaining, last_start + self._policy.minimum_interval_seconds - now)
+                if remaining <= 0:
+                    self._rate_limit.last_request_started_at = now
+                    return
+            finally:
+                self._rate_limit.lock.release()
 
-            if self._rate_limit.last_request_started_at is not None:
-                earliest_start = self._rate_limit.last_request_started_at + self._policy.minimum_interval_seconds
-                remaining = earliest_start - now
-
-                if remaining > 0:
-                    self._stage(context, "waiting_for_rate_limit")
-                    self._wait(remaining, context)
-
-            self._check_cancelled(context)
-            self._rate_limit.last_request_started_at = self._monotonic()
-        finally:
-            self._rate_limit.lock.release()
+            self._stage(context, "waiting_for_rate_limit")
+            self._wait(remaining, context)
 
     def _send(
         self,
@@ -431,12 +461,11 @@ class ProviderTransport:
 
             return retry_after, retry_after <= self._policy.max_retry_after_seconds
 
-        # Bound conversion before int(): an enormous untrusted header is already
-        # beyond the supported wait, so parsing every digit brings no benefit.
+        # Beyond the float range, retain a finite session-long deadline.
         significant_digits = candidate.lstrip("0") or "0"
 
-        if len(significant_digits) > 18:
-            return self._policy.max_retry_after_seconds + 1.0, False
+        if len(significant_digits) > 308:
+            return sys.float_info.max, False
 
         retry_after = float(int(significant_digits))
 

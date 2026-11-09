@@ -420,7 +420,8 @@ def lookup_ranking_issue(
         ReleaseMediumIdentity(candidate.engine_id, candidate.source_id, candidate.release_id, medium_index)
         for candidate in candidates_by_identity.values()
         if is_valid_basic_media(candidate)
-        for medium_index, _medium in enumerate(candidate.media)
+        for medium_index, medium in enumerate(candidate.media)
+        if not medium.is_data_only
     }
 
     if (

@@ -8,9 +8,9 @@ from metadata_polisher.infrastructure.settings import RenameSettings
 from metadata_polisher.scanner.grouping import AlbumGroup
 from metadata_polisher.session.review_editing import (
     local_reviews_after_lookup_reset,
-    rebuild_reviewed_files,
     regrouped_review_undo,
 )
+from metadata_polisher.session.review_previews import revalidate_review_destinations
 from metadata_polisher.session.state import GroupSelection, GroupState, SessionState
 
 _DEFAULT_RENAME_SETTINGS = RenameSettings()
@@ -85,16 +85,7 @@ def _install_groups(
         library_revision=state.library_revision + 1,
     )
 
-    # Resolve rename collisions against the complete new membership. A second
-    # pass observes every refreshed destination, including cross-group siblings.
-    for _pass in range(2):
-        staged = replace(staged, groups=tuple(
-            replace(group, reviewed_files=rebuild_reviewed_files(
-                staged, group, group.reviewed_files, rename_settings,
-            )) if any(source.file_id in affected_file_ids for source in group.group.files) else group
-            for group in staged.groups
-        ))
-
+    staged = revalidate_review_destinations(staged)
     return replace(staged, review_undo=regrouped_review_undo(staged, frozenset(affected_file_ids), rename_settings))
 
 
@@ -161,4 +152,5 @@ def set_disc_override(
     # decisions without bringing an obsolete provider proposal or mapping back.
     affected_file_ids = frozenset(source.file_id for source in current.group.files)
 
+    staged = revalidate_review_destinations(staged)
     return replace(staged, review_undo=regrouped_review_undo(staged, affected_file_ids, rename_settings))

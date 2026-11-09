@@ -257,8 +257,8 @@ def is_valid_basic_media(candidate: ReleaseCandidate) -> bool:
         raise TypeError("candidate must be a ReleaseCandidate")
 
     return (
-        bool(candidate.media)
-        and all(medium.tracks for medium in candidate.media)
+        any(medium.tracks for medium in candidate.media)
+        and all(medium.tracks or medium.is_data_only for medium in candidate.media)
         and not _contains_composers(candidate)
     )
 

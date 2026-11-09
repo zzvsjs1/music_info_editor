@@ -467,3 +467,21 @@ def test_undo_keeps_usable_batch_members_when_another_group_requires_rescan(newe
     assert undone.review_undo == ()
     assert review_undo_targets(undone) == ()
     assert undone.library_revision == invalidated.library_revision
+
+
+def test_aggregate_materialises_only_the_selected_local_files(monkeypatch):
+    from metadata_polisher.session import review_previews
+
+    files = tuple(make_source(f"{index}.flac") for index in range(6))
+    state = make_local_session(*files)
+    selected = (files[1].file_id, files[3].file_id)
+    requested = []
+    original = review_previews.local_reviews
+
+    def record(source):
+        requested.append(source.file_id)
+        return original(source)
+
+    monkeypatch.setattr(review_previews, "local_reviews", record)
+    aggregate_review_fields(state, selected, (MetadataField.TITLE,))
+    assert tuple(requested) == selected

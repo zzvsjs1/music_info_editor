@@ -32,11 +32,10 @@ def _search_text(query: ReleaseSearchQuery) -> str:
     return query.album.strip()
 
 
-# An HTTP 200 page can still be a challenge or malformed catalogue response.
-# Keep that semantic failure typed instead of caching it as an empty search.
-def _page_error(code: ProviderErrorCode) -> ProviderTransportError:
+def _invalid_page_error() -> ProviderTransportError:
+    """Report malformed catalogue pages before they can enter the cache."""
     return ProviderTransportError(
-        code=code,
+        code=ProviderErrorCode.INVALID_RESPONSE,
         context=ProviderTransportErrorContext(
             attempt_count=1,
             status_code=200,
@@ -100,15 +99,13 @@ class VgmdbProvider:
             params={"q": search_text, "type": "album"},
             headers=_HTML_HEADERS,
             context=context,
+            access_challenge=is_access_challenge,
         )
-
-        if is_access_challenge(html):
-            raise _page_error(ProviderErrorCode.ACCESS_DENIED)
 
         try:
             candidates = parse_search_results(html)
         except (TypeError, ValueError):
-            raise _page_error(ProviderErrorCode.INVALID_RESPONSE) from None
+            raise _invalid_page_error() from None
 
         self._cache.put(cache_key, candidates)
 
@@ -152,15 +149,13 @@ class VgmdbProvider:
             source_url,
             headers=_HTML_HEADERS,
             context=context,
+            access_challenge=is_access_challenge,
         )
-
-        if is_access_challenge(html):
-            raise _page_error(ProviderErrorCode.ACCESS_DENIED)
 
         try:
             enriched = parse_album_detail(html, source_url=source_url)
         except (TypeError, ValueError):
-            raise _page_error(ProviderErrorCode.INVALID_RESPONSE) from None
+            raise _invalid_page_error() from None
 
         self._cache.put(cache_key, enriched)
 

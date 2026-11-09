@@ -1,7 +1,7 @@
 """Pure derivation and preflight validation of immutable file changes."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
@@ -58,6 +58,7 @@ class ChangeIssueCode(StrEnum):
     """Stable reasons emitted by pure ChangeSet validation."""
 
     SOURCE_NOT_READABLE = "SOURCE_NOT_READABLE"
+    SOURCE_NOT_WRITABLE = "SOURCE_NOT_WRITABLE"
     SOURCE_CHANGED = "SOURCE_CHANGED"
     DIRECTORY_NOT_WRITABLE = "DIRECTORY_NOT_WRITABLE"
     DIRECTORY_LISTING_UNAVAILABLE = "DIRECTORY_LISTING_UNAVAILABLE"
@@ -111,11 +112,13 @@ class ChangeValidationFacts:
     unsupported_write_fields: tuple[MetadataField, ...] = ()
     existing_names: tuple[str, ...] = ()
     source_unchanged: bool = True
+    source_writable: bool = True
 
     def __post_init__(self) -> None:
         for name in (
             "source_readable",
             "source_unchanged",
+            "source_writable",
             "directory_writable",
             "directory_listing_available",
             "adapter_available",
@@ -312,26 +315,11 @@ def _copy_complete_reviews(values: object) -> tuple[FieldReviewState, ...]:
     return reviews
 
 
-def _has_semantic_value(value: FieldValue | None) -> bool:
-    if value is None:
-        return False
-
-    if isinstance(value, str):
-        return bool(value.strip())
-
-    if isinstance(value, tuple):
-        return bool(value)
-
-    return value.number is not None or value.total is not None
-
-
 def _validate_review_source_alignment(
     source: LocalMediaFile,
     reviews_by_field: dict[MetadataField, FieldReviewState],
 ) -> None:
     """Reject review state that was derived from a different scan snapshot."""
-    source_metadata = source.read_result.metadata
-
     for field in MetadataField:
         review = reviews_by_field[field]
         source_read_state = source.read_result.field_states[field]
@@ -341,20 +329,7 @@ def _validate_review_source_alignment(
                 f"review read_state for {field.value} does not match the source read state"
             )
 
-        source_value = metadata_value(source_metadata, field)
-
-        if source_read_state is FieldReadState.MISSING:
-            expected_existing: FieldValue | None = None
-        elif _has_semantic_value(source_value):
-            expected_existing = source_value
-        elif source_read_state is FieldReadState.PRESENT:
-            raise ValueError(
-                f"source value for present field {field.value} has no semantic value"
-            )
-        else:
-            expected_existing = None
-
-        if review.existing_value != expected_existing:
+        if review.existing_value != source.read_result.existing_value(field):
             raise ValueError(
                 f"review existing_value for {field.value} does not match the source snapshot"
             )
@@ -469,6 +444,35 @@ def _rename_problem_severity(rename_decision: RenameDecision) -> ChangeIssueSeve
     return ChangeIssueSeverity.WARNING
 
 
+def _destination_collision_issue(decision: RenameDecision) -> ChangeValidationIssue:
+    return ChangeValidationIssue(
+        code=ChangeIssueCode.DESTINATION_COLLISION,
+        severity=_rename_problem_severity(decision),
+        message="The destination filename collides with an existing directory entry.",
+        filename_issue_code=FilenameIssueCode.DESTINATION_COLLISION,
+    )
+
+
+def with_destination_collision(changes: FileChangeSet, occupied: bool) -> FileChangeSet:
+    """Update the reservation of an already rendered, valid destination component."""
+    if changes.rename_preview is None:
+        return changes
+
+    prior = changes.validation.issues
+    if occupied == any(issue.code is ChangeIssueCode.DESTINATION_COLLISION for issue in prior):
+        return changes
+
+    issues = tuple(issue for issue in prior if issue.code is not ChangeIssueCode.DESTINATION_COLLISION)
+    if occupied:
+        issues = (*issues, _destination_collision_issue(changes.rename_decision))
+
+    # A preview exists only when the name could be rendered and sanitised. Keep
+    # every other preflight blocker; the collision controls just the rename.
+    approved = changes.rename_decision is RenameDecision.APPLY_RENAME and not occupied
+    return replace(changes, rename_change=changes.rename_preview if approved else None,
+                   validation=ChangeValidationResult(issues))
+
+
 @dataclass(frozen=True)
 class _DerivedRename:
     """Keep the explanatory preview separate from the approved filesystem change."""
@@ -559,14 +563,7 @@ def _derive_rename(
     )
 
     if not collision.is_valid:
-        issues.append(
-            ChangeValidationIssue(
-                code=ChangeIssueCode.DESTINATION_COLLISION,
-                severity=severity,
-                message="The destination filename collides with an existing directory entry.",
-                filename_issue_code=FilenameIssueCode.DESTINATION_COLLISION,
-            )
-        )
+        issues.append(_destination_collision_issue(rename_decision))
 
     # Retain the preview for explanation even when a collision prevents it from
     # becoming an executable rename. Intent, preview and write are distinct.
@@ -621,6 +618,14 @@ def _derive_preflight_issues(
             _blocking_issue(
                 ChangeIssueCode.SOURCE_NOT_READABLE,
                 "The source file is not readable for a transactional write.",
+            )
+        )
+
+    if operation_requested and validation.source_readable and not validation.source_writable:
+        issues.append(
+            _blocking_issue(
+                ChangeIssueCode.SOURCE_NOT_WRITABLE,
+                "The source file is read-only or write access was denied.",
             )
         )
 

@@ -1,6 +1,7 @@
 """Pure parsing of public VGMdb HTML into provider-neutral models."""
 
 import re
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -104,13 +105,14 @@ class _MergedTrack:
 
 
 type _PositionKey = tuple[Literal["number", "row"], int]
+type _TrackKey = tuple[_PositionKey, int]
 
 
 @dataclass
 class _MergedMedium:
     number: int | None
     title: str | None
-    tracks: dict[_PositionKey, _MergedTrack]
+    views: list[tuple[_MediumVariant, str | None, str | None]]
 
 
 def _document(html: str) -> _Node:
@@ -560,14 +562,13 @@ def _position_key(number: int | None, row: int) -> _PositionKey:
 
 
 def _merge_track_variant(
-    tracks: dict[_PositionKey, _MergedTrack],
+    tracks: dict[_TrackKey, _MergedTrack],
     track: _TrackVariant,
-    row: int,
+    track_key: _TrackKey,
     language: str | None,
     script: str | None,
 ) -> None:
     """Add one language variant while retaining the first known track facts."""
-    track_key = _position_key(track.number, row)
     merged_track = tracks.get(track_key)
 
     if merged_track is None:
@@ -593,6 +594,29 @@ def _merge_track_variant(
 
 def _release_medium(medium: _MergedMedium) -> ReleaseMedium:
     """Freeze accumulated language evidence without inferring track credits."""
+    views = [
+        (view, language, script, Counter(_position_key(track.number, row) for row, track in enumerate(view.tracks, 1)))
+        for view, language, script in medium.views
+    ]
+    maximum_counts: Counter[_PositionKey] = Counter()
+    for _view, _language, _script, counts in views:
+        maximum_counts |= counts
+
+    merged_tracks: dict[_TrackKey, _MergedTrack] = {}
+    if any(count > 1 for count in maximum_counts.values()):
+        # Start with a full listing so a sparse translation cannot move the
+        # repeated rows to the end of the disc or claim the wrong occurrence.
+        views.sort(key=lambda entry: len(entry[0].tracks), reverse=True)
+
+    for view, language, script, counts in views:
+        seen: Counter[_PositionKey] = Counter()
+        for row, track in enumerate(view.tracks, 1):
+            key = _position_key(track.number, row)
+            if counts[key] != maximum_counts[key]:
+                continue
+            seen[key] += 1
+            _merge_track_variant(merged_tracks, track, (key, seen[key]), language, script)
+
     tracks = tuple(
         ProviderTrack(
             track_number=track.number,
@@ -603,7 +627,7 @@ def _release_medium(medium: _MergedMedium) -> ReleaseMedium:
             duration_seconds=track.duration_seconds,
             printed_number=track.printed_number,
         )
-        for track in medium.tracks.values()
+        for track in merged_tracks.values()
     )
 
     return ReleaseMedium(
@@ -650,12 +674,11 @@ def _merged_media(document: _Node) -> tuple[ReleaseMedium, ...]:
                 merged_medium = _MergedMedium(
                     number=medium.number,
                     title=medium.title,
-                    tracks={},
+                    views=[],
                 )
                 merged[medium_key] = merged_medium
 
-            for track_index, track in enumerate(medium.tracks, start=1):
-                _merge_track_variant(merged_medium.tracks, track, track_index, language, script)
+            merged_medium.views.append((medium, language, script))
 
     return tuple(_release_medium(medium) for medium in merged.values())
 

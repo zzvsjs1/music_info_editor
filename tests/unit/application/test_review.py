@@ -456,6 +456,24 @@ def test_han_only_language_ambiguity_keeps_a_single_missing_proposal_reviewable(
     assert ReviewReasonCode.LANGUAGE_PROFILE_AMBIGUOUS in state.reason_codes
 
 
+@pytest.mark.parametrize(("preferred_language", "local_texts"), [
+    ("ja", ("さくら",)), ("romanised", ("さくら",)), ("auto", ("さくら",)), ("auto", ()),
+])
+def test_release_script_cannot_resolve_a_contradictory_track_variant(
+    preferred_language: str, local_texts: tuple[str, ...],
+) -> None:
+    state = build_field_review_state(
+        field=MetadataField.TITLE, read_state=FieldReadState.MISSING, existing_value=None,
+        proposals=(proposal("Sakura", language="jpn", script="Jpan"),),
+        preferred_language=preferred_language, local_texts=local_texts,
+    )
+
+    assert state.decision is FieldDecisionKind.UNRESOLVED
+    assert state.requires_review
+    assert ReviewReasonCode.LANGUAGE_MATCH not in state.proposals[0].reason_codes
+    assert state.proposals[0].members[0].script == "Jpan"
+
+
 def test_reranking_rebuilds_default_proposal_order_without_mutating_old_state() -> None:
     japanese = proposal("星のカービィ", source_id="catalogue-a", language="jpn", script="Jpan")
     english = proposal("Kirby", source_id="catalogue-b", language="eng", script="Latn")

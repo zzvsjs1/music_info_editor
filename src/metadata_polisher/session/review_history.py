@@ -1,5 +1,6 @@
 """Capture and restore bounded in-memory review actions with stale-source checks."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from metadata_polisher.application.changes import RenameDecision
@@ -7,6 +8,7 @@ from metadata_polisher.infrastructure.settings import RenameSettings
 from metadata_polisher.session.review_previews import (
     complete_reviewed_files_by_id,
     rebuild_changed_review_groups,
+    rebuild_reviewed_files,
     rename_intent,
     review_sources_by_id,
     reviewed_files_by_id,
@@ -57,6 +59,55 @@ def record_review_action(before: SessionState, after: SessionState) -> SessionSt
     history = (*before.review_undo, entry)[-REVIEW_UNDO_LIMIT:]
 
     return replace(after, review_undo=history)
+
+
+def project_group_review_undo(
+    state: SessionState,
+    group: GroupState,
+    rename_settings: RenameSettings,
+    project: Callable[[ReviewedFileState], ReviewedFileState],
+) -> tuple[ReviewUndoEntry, ...]:
+    """Project both sides of each retained action onto the current provider evidence."""
+    sources = {source.file_id: source for source in group.group.files}
+    history: list[ReviewUndoEntry] = []
+
+    for entry in state.review_undo:
+        retained: list[ReviewUndoFile] = []
+
+        for item in entry.files:
+            source = sources.get(item.source.file_id)
+
+            if source is None:
+                retained.append(item)
+                continue
+
+            # A new mapping or language cannot rehabilitate replaced sources or
+            # a group whose filesystem state already requires a fresh scan.
+            if group.requires_rescan or source != item.source:
+                continue
+
+            projected = []
+
+            for previous in (item.before, item.after):
+                # Use the live-field transform on both sides, so sequential
+                # actions remain a chain. Merely relaxing Undo's equality check
+                # would instead restore old proposal ordering and reason codes.
+                # Rebuild each side separately: two snapshots of one file are
+                # different moments, never a two-file rename destination set.
+                rebuilt = rebuild_reviewed_files(
+                    state, group, (project(previous),), rename_settings,
+                    rename_decisions={source.file_id: rename_intent(previous)},
+                )
+                projected.append(rebuilt[0])
+
+            before, after = projected
+            if before.reviews != after.reviews or rename_intent(before) is not rename_intent(after):
+                retained.append(ReviewUndoFile(source, before, after))
+
+        if retained:
+            history.append(ReviewUndoEntry(tuple(retained)))
+
+    return tuple(history)
 
 
 def next_review_undo_action(state: SessionState) -> NextReviewUndoAction:

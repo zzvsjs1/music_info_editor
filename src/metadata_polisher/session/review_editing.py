@@ -36,6 +36,7 @@ from metadata_polisher.session.review_previews import (
     rebuild_changed_review_groups,
     rebuild_reviewed_files,
     rename_intent,
+    revalidate_review_destinations,
     review_sources_by_id,
 )
 from metadata_polisher.session.state import (
@@ -223,7 +224,7 @@ def _install_reviews(
         revision=state.revision + 1,
     )
 
-    return record_review_action(state, updated)
+    return record_review_action(state, revalidate_review_destinations(updated))
 
 
 def retain_user_decision(
@@ -577,36 +578,18 @@ def refresh_rename_previews(state: SessionState, rename_settings: RenameSettings
     if not affected:
         return state
 
-    staged = state
-
-    # The first pass renders every group with the new settings. The second sees
-    # that complete destination set, including groups sharing a physical folder.
-    for _pass in range(2):
-        groups = []
-
-        for group in staged.groups:
-            if group.group.group_id not in affected:
-                groups.append(group)
-                continue
-
+    groups = []
+    for group in state.groups:
+        if group.group.group_id in affected:
             rebuilt = rebuild_reviewed_files(
-                staged, group, tuple(item for item in group.reviewed_files if item.reviews), rename_settings,
+                state, group, tuple(item for item in group.reviewed_files if item.reviews), rename_settings,
             )
             by_id = {item.file_id: item for item in rebuilt}
             reviewed_files = tuple(by_id.get(item.file_id, item) for item in group.reviewed_files)
-            groups.append(replace(group, selected_metadata=None, reviewed_files=reviewed_files))
-
-        staged = replace(staged, groups=tuple(groups))
-
-    groups = []
-
-    for group in staged.groups:
-        if group.group.group_id in affected:
-            group = replace(group, revision=group.revision + 1)
-
+            group = replace(group, selected_metadata=None, reviewed_files=reviewed_files, revision=group.revision + 1)
         groups.append(group)
 
-    return replace(staged, revision=state.revision + 1, groups=tuple(groups))
+    return revalidate_review_destinations(replace(state, revision=state.revision + 1, groups=tuple(groups)))
 
 
 def _is_safe_addition(review: FieldReviewState) -> bool:
@@ -973,7 +956,7 @@ def aggregate_review_fields(
     if not ids or len(set(ids)) != len(ids):
         raise ValueError("Choose a non-empty selection of unique files.")
 
-    reviews = complete_reviewed_files_by_id(state)
+    reviews = complete_reviewed_files_by_id(state, frozenset(ids))
 
     if not set(ids).issubset(reviews):
         raise ValueError("Every selected file must still belong to this library.")

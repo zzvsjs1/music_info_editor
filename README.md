@@ -25,6 +25,8 @@ If you want a backup of the original, enable **Keep permanent backups** in **Set
 3. Choose **Add selected files**, then **Review & Apply…**. Select the file in the summary to compare its old and new tags.
 4. Choose **Apply changes** to write the edit.
 
+If Apply reports a recovery file, keep the files at the paths shown in the result. Compare their tags, choose the copy you want to keep, then rescan the folder before editing again.
+
 You can edit tags offline. For suggestions, select an album and choose **Find Metadata for Selected**. For filenames, select the tracks and choose **Rename files…** to preview their new names. Press **F1** in the library for the full workflow and keyboard shortcuts.
 
 ## Contributing

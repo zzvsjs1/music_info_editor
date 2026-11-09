@@ -9,6 +9,8 @@ from metadata_polisher.infrastructure.settings import RenameSettings
 from metadata_polisher.matching.release_scoring import MatchClassification
 from metadata_polisher.matching.track_mapping import TrackMappingResult
 from metadata_polisher.session.review_editing import rebuild_reviewed_files, retain_user_decision
+from metadata_polisher.session.review_history import project_group_review_undo
+from metadata_polisher.session.review_previews import revalidate_review_destinations
 from metadata_polisher.session.state import ReviewedFileState, SessionState
 
 
@@ -44,7 +46,9 @@ def apply_manual_track_mapping(
         release_classification=classification,
         preferred_language=group.language_override or preferred_language,
     )
-    previous = {item.file_id: {review.field: review for review in item.reviews} for item in group.reviewed_files}
+    fresh_by_id = {result.file_id: ReviewedFileState(
+        result.file_id, result.proposals, result.reviews, result.track_mapping_resolved,
+    ) for result in rebuilt}
     old_mapping = group.effective_track_mapping
     previous_tracks = {
         item.local_file_id: item.provider_track_index for item in old_mapping.mappings
@@ -53,24 +57,25 @@ def apply_manual_track_mapping(
     # Release-level choices survive a track reassignment. Track-level candidate
     # choices survive only when that file still points to the same provider index.
     track_fields = {MetadataField.TITLE, MetadataField.ARTISTS, MetadataField.COMPOSERS, MetadataField.TRACK}
-    reviews = tuple(
-        ReviewedFileState(
-            result.file_id, result.proposals,
-            tuple(
+
+    def project(previous: ReviewedFileState) -> ReviewedFileState:
+        fresh = fresh_by_id[previous.file_id]
+        old_fields = {review.field: review for review in previous.reviews}
+        same_track = previous_tracks.get(previous.file_id) == current_tracks.get(previous.file_id)
+        return replace(
+            fresh, reviews=tuple(
                 retain_user_decision(
-                    previous[result.file_id][fresh.field], fresh,
-                    candidate_dependency_unchanged=(
-                            fresh.field not in track_fields
-                            or previous_tracks.get(result.file_id) == current_tracks.get(result.file_id)
-                    ),
+                    old_fields[review.field], review,
+                    candidate_dependency_unchanged=(review.field not in track_fields or same_track),
                 )
-                if fresh.field in previous.get(result.file_id, {}) else fresh
-                for fresh in result.reviews
+                if review.field in old_fields else review
+                for review in fresh.reviews
             ),
-            result.track_mapping_resolved,
         )
-        for result in rebuilt
-    )
+
+    previous_by_id = {item.file_id: item for item in group.reviewed_files}
+    reviews = tuple(project(previous_by_id[file_id]) if file_id in previous_by_id else fresh
+                    for file_id, fresh in fresh_by_id.items())
     rename_decisions = {
         item.file_id: item.change_set.rename_decision if item.change_set is not None else RenameDecision.KEEP_FILENAME
         for item in group.reviewed_files
@@ -83,7 +88,9 @@ def apply_manual_track_mapping(
         selected_metadata=None, revision=group.revision + 1,
     )
 
-    return replace(
+    staged = replace(
         state, groups=tuple(replacement if item is group else item for item in state.groups),
         revision=state.revision + 1,
     )
+    staged = revalidate_review_destinations(staged)
+    return replace(staged, review_undo=project_group_review_undo(staged, replacement, rename_settings, project))

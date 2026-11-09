@@ -3,7 +3,9 @@
 import logging
 import os
 import shutil
+from collections import Counter, defaultdict
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -35,7 +37,7 @@ from metadata_polisher.execution.events import (
 )
 from metadata_polisher.formats.base import MediaFormatAdapter, MediaFormatError
 from metadata_polisher.formats.registry import FormatRegistry
-from metadata_polisher.infrastructure.filesystem import read_file_version
+from metadata_polisher.infrastructure.filesystem import read_file_version, source_is_writable
 from metadata_polisher.infrastructure.reporting import (
     ProcessingReportRequest,
     ReportErrorCode,
@@ -350,6 +352,8 @@ class ApplyPathProbe(Protocol):
 
     def is_readable_file(self, path: Path) -> bool: ...
 
+    def is_writable_file(self, path: Path) -> bool: ...
+
     def is_writable_directory(self, path: Path) -> bool: ...
 
     def directory_names(self, path: Path) -> tuple[str, ...] | None: ...
@@ -371,6 +375,8 @@ class _FormatResolver(Protocol):
 
 class LocalApplyPathProbe:
     """Best-effort production probe which never creates or modifies a path."""
+
+    is_writable_file = staticmethod(source_is_writable)
 
     def resolve(self, path: Path) -> Path:
         return path.resolve(strict=False)
@@ -446,6 +452,40 @@ class LocalApplyPreflightInspector:
     ) -> None:
         self._registry = registry if registry is not None else FormatRegistry()
         self._probe = probe if probe is not None else LocalApplyPathProbe()
+        self._directory_index: dict[tuple[str, ...], dict[str, list[str]] | None] | None = None
+
+    def for_batch(self) -> LocalApplyPreflightInspector:
+        """Use one fresh directory snapshot per parent for this Apply only."""
+        scoped = copy(self)
+        scoped._directory_index = {}
+        return scoped
+
+    def _directory_evidence(self, parent: Path, proposed: FileChangeSet) -> tuple[str, ...] | None:
+        if self._directory_index is None:
+            return self._probe.directory_names(parent)
+
+        key = _windows_path_key(parent)
+        if key not in self._directory_index:
+            names = self._probe.directory_names(parent)
+            if names is None:
+                self._directory_index[key] = None
+            else:
+                by_name: dict[str, list[str]] = defaultdict(list)
+                for name in names:
+                    by_name[windows_collision_key(name)].append(name)
+                self._directory_index[key] = by_name
+
+        indexed = self._directory_index[key]
+        if indexed is None:
+            return None
+
+        # The captured template and reviews fix the target before probing.
+        # Only matching entries can affect this file's collision validation.
+        preview = proposed.rename_preview
+        if preview is None:
+            return ()
+
+        return tuple(indexed.get(windows_collision_key(preview.new_path.name), ()))
 
     def inspect(
         self,
@@ -483,7 +523,7 @@ class LocalApplyPreflightInspector:
         source_size = self._probe.file_size(source_path)
         temporary_storage = self._probe.storage(source_path.parent)
         temporary_space_known = source_size is not None and temporary_storage is not None
-        directory_names = self._probe.directory_names(source_path.parent)
+        directory_names = self._directory_evidence(source_path.parent, proposed_changes)
         directory_listing_available = directory_names is not None
         existing_names = directory_names or ()
         backup_storage: PathStorageSnapshot | None = None
@@ -576,6 +616,7 @@ class LocalApplyPreflightInspector:
             adapter=adapter,
             validation=ChangeValidationFacts(
                 source_readable=source_readable,
+                source_writable=source_readable and self._probe.is_writable_file(source_path),
                 source_unchanged=source_unchanged,
                 directory_writable=directory_writable,
                 directory_listing_available=directory_listing_available,
@@ -1233,6 +1274,9 @@ class ApplyService:
         prepared_by_file_id: dict[str, _PreparedFile] = {}
         prepared_count = 0
         preflight_cancelled = False
+        inspector = self._preflight
+        if isinstance(inspector, LocalApplyPreflightInspector):
+            inspector = inspector.for_batch()
 
         for draft_group in draft_groups:
             prepared_files: list[_PreparedFile] = []
@@ -1242,7 +1286,7 @@ class ApplyService:
                     preflight_cancelled = True
                     break
 
-                prepared = self._prepare_file(request, draft)
+                prepared = self._prepare_file(request, draft, inspector)
                 prepared_files.append(prepared)
                 prepared_by_file_id[draft.request.source.file_id] = prepared
                 prepared_count += 1
@@ -1272,14 +1316,17 @@ class ApplyService:
 
         return _BatchPreflight(tuple(prepared_groups), preflight_cancelled)
 
-    def _prepare_file(self, request: ApplyBatchRequest, draft: _DraftFile) -> _PreparedFile:
+    @staticmethod
+    def _prepare_file(
+        request: ApplyBatchRequest, draft: _DraftFile, inspector: ApplyPreflightInspector,
+    ) -> _PreparedFile:
         """Refresh external facts only when a file actually requests an operation."""
         file_request = draft.request
 
-        if not self._needs_external_preflight(draft.change_set):
+        if not ApplyService._needs_external_preflight(draft.change_set):
             return _PreparedFile(file_request, draft.change_set, None, draft.validation, None)
 
-        snapshot = self._preflight.inspect(file_request.source, draft.change_set, request.backup)
+        snapshot = inspector.inspect(file_request.source, draft.change_set, request.backup)
 
         if snapshot.file_id != file_request.source.file_id:
             raise ValueError("preflight snapshot must refer to the inspected file")
@@ -1854,6 +1901,14 @@ class ApplyService:
             for prepared in prepared_group.files
         )
         rebuilt_by_file_id: dict[str, _PreparedFile] = {}
+        source_names: dict[tuple[str, ...], set[str]] = defaultdict(set)
+        target_counts: Counter[tuple[str, ...]] = Counter()
+        for prepared in indexed:
+            source = prepared.request.source.path
+            source_names[_windows_path_key(source)].add(source.name)
+            preview = prepared.change_set.rename_preview
+            if preview is not None and prepared.request.rename_decision is RenameDecision.APPLY_RENAME:
+                target_counts[_windows_path_key(preview.new_path)] += 1
 
         for prepared in indexed:
             preview = prepared.change_set.rename_preview
@@ -1868,27 +1923,16 @@ class ApplyService:
                 and windows_collision_key(preview.old_path.name)
                 == windows_collision_key(preview.new_path.name)
             )
-            parent_key = _windows_path_key(preview.new_path.parent)
-            # Reserve original names as well as other planned destinations.
-            # A later rename must not depend on an earlier file vacating its name.
-            batch_names = [
-                other.request.source.path.name
-                for other in indexed
-                if _windows_path_key(other.request.source.path.parent) == parent_key
-            ]
-            batch_names.extend(
-                other.change_set.rename_preview.new_path.name
-                for other in indexed
-                if other is not prepared
-                and other.change_set.rename_preview is not None
-                and other.request.rename_decision is RenameDecision.APPLY_RENAME
-                and _windows_path_key(other.change_set.rename_preview.new_path.parent) == parent_key
-            )
+            target_key = _windows_path_key(preview.new_path)
+            # The directory snapshot may already include the selected source.
+            # Other files targeting this name reserve it independently of that
+            # physical entry, even when their proposed spelling is identical.
             existing_names = list(prepared.validation.existing_names)
+            listed = set(existing_names)
+            existing_names.extend(name for name in source_names.get(target_key, ()) if name not in listed)
 
-            for name in batch_names:
-                if name not in existing_names:
-                    existing_names.append(name)
+            if target_counts[target_key] > 1:
+                existing_names.append(preview.new_path.name)
 
             validation = replace(
                 prepared.validation,

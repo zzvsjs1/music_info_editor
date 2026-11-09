@@ -52,6 +52,12 @@ class _PairCompetition:
 
 
 @dataclass(frozen=True)
+class _SegmentCandidates:
+    permitted: frozenset[_PairIndex]
+    ambiguous_local_indexes: frozenset[int]
+
+
+@dataclass(frozen=True)
 class _AlignmentResult:
     pairs: _PairIndexes
     ambiguous_local_indexes: frozenset[int]
@@ -455,13 +461,18 @@ def _duration_dimension(
     )
 
 
+def _provider_number(track: ProviderTrack) -> int | None:
+    # A catalogue's internal row position is not a printed track identity.
+    return track.track_number if track.supports_automatic_numbering else None
+
+
 def _number_dimension(
     local: LocalMediaFile,
     provider: ProviderTrack,
     policy: MatchingPolicy,
 ) -> _NumberDimension:
     local_number = _local_number(local)
-    provider_number = _positive_integer(provider.track_number)
+    provider_number = _provider_number(provider)
     weight = policy.track_mapping.track_number_weight
 
     if local_number.number is None or provider_number is None:
@@ -626,7 +637,7 @@ def _anchor_candidates(
     policy: MatchingPolicy,
 ) -> _PairIndexes:
     local_numbers = tuple(_local_number(file) for file in local_files)
-    provider_numbers = tuple(_positive_integer(track.track_number) for track in provider_tracks)
+    provider_numbers = tuple(_provider_number(track) for track in provider_tracks)
     local_number_counts = Counter(item.number for item in local_numbers)
     provider_number_counts = Counter(provider_numbers)
     provider_indexes = {number: index for index, number in enumerate(provider_numbers)}
@@ -802,7 +813,7 @@ def _competition_groups(
     )
 
 
-def _feasible_segment_pairs(
+def _segment_candidates(
     assessments: _AssessmentMatrix,
     *,
     local_start: int,
@@ -810,7 +821,7 @@ def _feasible_segment_pairs(
     provider_start: int,
     provider_end: int,
     policy: MatchingPolicy,
-) -> _PairIndexes:
+) -> _SegmentCandidates:
     candidates: list[_PairIndex] = []
 
     for local_index in range(local_start, local_end):
@@ -830,19 +841,30 @@ def _feasible_segment_pairs(
         and _has_high_content_confidence(assessments[pair.local_index][pair.provider_index], policy)
     )
 
-    # Only mutually unique, well-supported neighbours may exclude a rival.
-    # Conflicting neighbours are not settled by a positional tie-break: omit
-    # both as constraints and leave their competing paths to normal alignment.
+    # A mutually preferred pair can constrain sequence order only if it does
+    # not cross another such pair. Crossing favourites still identify their
+    # endpoints: assigning either endpoint to a weaker positional alternative
+    # could transfer another track's credits with high confidence.
     compatible_neighbours = tuple(
         pair
         for pair in neighbours
         if all(_order_compatible(pair, other) for other in neighbours)
     )
 
-    return tuple(
+    crossing = frozenset(neighbours).difference(compatible_neighbours)
+    crossing_locals = frozenset(pair.local_index for pair in crossing)
+    crossing_providers = frozenset(pair.provider_index for pair in crossing)
+    feasible = tuple(
         pair
         for pair in plausible
-        if all(_order_compatible(pair, neighbour) for neighbour in compatible_neighbours)
+        if (pair in crossing or
+            (pair.local_index not in crossing_locals and pair.provider_index not in crossing_providers))
+        and all(_order_compatible(pair, neighbour) for neighbour in compatible_neighbours)
+    )
+    tied = _ambiguous_from_pairs(assessments, feasible, policy)
+    return _SegmentCandidates(
+        permitted=frozenset(pair for pair in feasible if pair.local_index not in tied),
+        ambiguous_local_indexes=tied | crossing_locals,
     )
 
 
@@ -869,28 +891,6 @@ def _ambiguous_from_pairs(
             ambiguous.update(pair.local_index for pair in candidates)
 
     return frozenset(ambiguous)
-
-
-def _ambiguous_locals(
-    assessments: _AssessmentMatrix,
-    *,
-    local_start: int,
-    local_end: int,
-    provider_start: int,
-    provider_end: int,
-    policy: MatchingPolicy,
-) -> frozenset[int]:
-    """Expose ambiguity exclusions separately for diagnostics and the oracle."""
-    feasible = _feasible_segment_pairs(
-        assessments,
-        local_start=local_start,
-        local_end=local_end,
-        provider_start=provider_start,
-        provider_end=provider_end,
-        policy=policy,
-    )
-
-    return _ambiguous_from_pairs(assessments, feasible, policy)
 
 
 # Prefer the greatest accumulated reward. Treat nearly equal float totals
@@ -921,7 +921,7 @@ def _align_segment(
     local_count = local_end - local_start
     provider_count = provider_end - provider_start
     gap = policy.track_mapping.gap_penalty
-    feasible = _feasible_segment_pairs(
+    segment = _segment_candidates(
         assessments,
         local_start=local_start,
         local_end=local_end,
@@ -929,8 +929,8 @@ def _align_segment(
         provider_end=provider_end,
         policy=policy,
     )
-    ambiguous = _ambiguous_from_pairs(assessments, feasible, policy)
-    permitted_pairs = frozenset(pair for pair in feasible if pair.local_index not in ambiguous)
+    ambiguous = segment.ambiguous_local_indexes
+    permitted_pairs = segment.permitted
 
     # With no permitted matches, every possible path only skips tracks.
     # Its private reward cannot affect the returned empty path or ambiguity.
@@ -1038,16 +1038,21 @@ def _align_around_anchors(
 # Contradictions cap confidence here rather than deleting useful partial
 # results from the alignment.
 def _mapping_classification(
-    assessment: _PairAssessment,
-    policy: MatchingPolicy,
+    assessment: _PairAssessment, policy: MatchingPolicy, *, order_conflict: bool,
 ) -> MatchClassification:
-    if _has_high_content_confidence(assessment, policy):
+    if not order_conflict and _has_high_content_confidence(assessment, policy):
         return MatchClassification.HIGH
 
     return MatchClassification.REVIEW
 
 
-def _mapping_evidence(assessment: _PairAssessment) -> tuple[MatchEvidence, ...]:
+def _mapping_evidence(assessment: _PairAssessment, *, order_conflict: bool) -> tuple[MatchEvidence, ...]:
+    if order_conflict:
+        return (*assessment.evidence, _evidence(
+            MatchReasonCode.TRACK_MAPPING_AMBIGUOUS, 0.0,
+            "Supported track identities cross in sequence order. Check this assignment in Map tracks.",
+        ))
+
     if assessment.support_dimension_count > 0:
         return assessment.evidence
 
@@ -1203,9 +1208,12 @@ def map_tracks(
             score=assessments[pair.local_index][pair.provider_index].score,
             classification=_mapping_classification(
                 assessments[pair.local_index][pair.provider_index],
-                policy,
+                policy, order_conflict=pair.local_index in alignment.ambiguous_local_indexes,
             ),
-            evidence=_mapping_evidence(assessments[pair.local_index][pair.provider_index]),
+            evidence=_mapping_evidence(
+                assessments[pair.local_index][pair.provider_index],
+                order_conflict=pair.local_index in alignment.ambiguous_local_indexes,
+            ),
         )
         for pair in alignment.pairs
     )

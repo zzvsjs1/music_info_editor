@@ -199,3 +199,23 @@ def test_language_merge_keeps_row_identity_separate_and_only_fills_missing_durat
     ]
     assert [track.duration_seconds for track in medium.tracks] == [30.0, 181.0]
     assert medium.tracks_complete is False
+
+
+def test_repeated_printed_number_keeps_distinct_tracks_across_language_views() -> None:
+    html = load_fixture("album_detail.html").replace('class="label">02</span>', 'class="label">01</span>')
+    tracks = parse_album_detail(html, source_url="https://vgmdb.net/album/4242").media[0].tracks
+
+    assert [track.printed_number for track in tracks] == ["01", "01"]
+    assert [track.duration_seconds for track in tracks] == [181.0, 245.0]
+    assert [[title.language for title in track.titles] for track in tracks] == [["en", "ja"], ["en", "ja"]]
+
+
+def test_partial_translation_cannot_identify_which_repeated_number_it_describes() -> None:
+    html = """
+    <h1><span class="albumtitle">Album</span></h1><div id="tracklist">
+    <span lang="ja"><table class="role"><tr><td>1</td><td>Incomplete translation</td></tr></table></span>
+    <span lang="en"><table class="role"><tr><td>1</td><td>Intro</td></tr>
+      <tr><td>1</td><td>Finale</td></tr></table></span></div>
+    """
+    tracks = parse_album_detail(html, source_url="https://vgmdb.net/album/42").media[0].tracks
+    assert [[title.value for title in track.titles] for track in tracks] == [["Intro"], ["Finale"]]

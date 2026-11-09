@@ -120,6 +120,7 @@ def _normalise_field_value(
     *,
     name: str,
     allow_none: bool,
+    existing_text: bool = False,
 ) -> FieldValue | None:
     if value is None:
         if allow_none:
@@ -131,7 +132,7 @@ def _normalise_field_value(
         if not isinstance(value, str):
             raise TypeError(f"{name} for {field.value} must be a string")
 
-        if not value.strip():
+        if not value or (not existing_text and not value.strip()):
             raise ValueError(f"{name} for {field.value} cannot be blank")
 
         return value
@@ -144,7 +145,7 @@ def _normalise_field_value(
         if not values:
             raise ValueError(f"{name} for {field.value} cannot be empty")
 
-        if any(not item.strip() for item in values):
+        if any(not item or (not existing_text and not item.strip()) for item in values):
             raise ValueError(f"{name} for {field.value} cannot contain blank values")
 
         return values
@@ -295,6 +296,7 @@ class FieldReviewState:
             self.existing_value,
             name="existing_value",
             allow_none=True,
+            existing_text=True,
         )
         proposals = _normalise_typed_tuple("proposals", self.proposals, ConsolidatedProposal)
 

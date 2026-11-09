@@ -27,6 +27,7 @@ from metadata_polisher.infrastructure.settings import AppSettings
 from metadata_polisher.infrastructure.transaction import TransactionalFileWriter
 from metadata_polisher.session.apply_preparation import prepare_apply_request, reviewed_file_ids
 from metadata_polisher.session.review_editing import apply_rename_choices
+from metadata_polisher.session.review_previews import scoped_change_sets
 from metadata_polisher.session.state import (
     OperationKind,
     SessionState,
@@ -241,12 +242,7 @@ class QuickApply(QObject):
             host.set_status(str(error))
             return False
 
-        changes = tuple(
-            item.change_set
-            for group in state.groups
-            for item in group.reviewed_files
-            if item.file_id in selected and item.change_set is not None
-        )
+        changes = scoped_change_sets(state, frozenset(selected))
         summary = build_apply_summary(
             changes,
             backup_enabled=settings.backup.enabled,

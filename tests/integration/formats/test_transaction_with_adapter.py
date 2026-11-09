@@ -238,6 +238,7 @@ def test_external_edits_at_write_boundaries_preserve_the_source(
 def test_source_moved_by_an_external_editor_does_not_delete_its_new_path(tmp_path: Path) -> None:
     source_path = tmp_path / "raw.simple"
     destination = tmp_path / "renamed.simple"
+    external_path = tmp_path / "moved-by-editor.simple"
     original = "title=Old title\npayload=audio-bytes-stay\n"
     source_path.write_text(original, encoding="utf-8")
     source = LocalMediaFile(
@@ -263,7 +264,9 @@ def test_source_moved_by_an_external_editor_does_not_delete_its_new_path(tmp_pat
             super().emit(event)
 
             if isinstance(event, FileStageChanged) and event.stage is FileTransactionStage.CLEANING_ORIGINAL:
-                source_path.replace(destination)
+                # The verified destination is pinned. The original can still
+                # be moved independently before the transaction opens it for cleanup.
+                source_path.rename(external_path)
 
     result = TransactionalFileWriter().apply_file(
         source, changes, SimpleTextAdapter(),  # type: ignore[arg-type]
@@ -273,4 +276,6 @@ def test_source_moved_by_an_external_editor_does_not_delete_its_new_path(tmp_pat
     assert result.status is FileApplyStatus.FAILED
     assert result.issues[0].code is MediaErrorCode.SOURCE_CHANGED
     assert result.final_path == destination
-    assert destination.read_text(encoding="utf-8") == original
+    assert external_path.read_text(encoding="utf-8") == original
+    assert destination.read_text(encoding="utf-8") == original.replace("Old title", "New title")
+    assert not source_path.exists()

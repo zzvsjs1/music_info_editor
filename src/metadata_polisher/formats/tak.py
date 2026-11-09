@@ -18,6 +18,7 @@ from metadata_polisher.domain.metadata import (
     Position,
     metadata_value,
 )
+from metadata_polisher.formats.ape_policy import protected_ape_items
 from metadata_polisher.formats.base import MediaFormatError, TagReadResult, VerificationResult
 from metadata_polisher.formats.id3_policy import read_id3v1_tail
 
@@ -370,6 +371,8 @@ class TakAdapter:
         # or changing tags; the transaction then retains the original file.
         try:
             _validate_legacy_tail(path)
+            edited_keys = {key.casefold() for keys, _, _ in encoded_changes for key in keys}
+            protected = protected_ape_items(path, edited_keys)
         except (OSError, ValueError) as error:
             raise MediaFormatError.from_cause(
                 path=path,
@@ -423,12 +426,18 @@ class TakAdapter:
             _remove_keys(audio.tags, aliases)
 
         try:
-            audio.save()
+            if protected is None:
+                audio.save()
+            else:
+                protected.save(path, audio.tags)
         except Exception as error:
             raise MediaFormatError.from_cause(
                 path=path,
                 code=MediaErrorCode.TAG_WRITE_FAILED,
-                message="Could not save TAK metadata.",
+                message=(
+                    f"Could not preserve protected TAK metadata. {error}"
+                    if protected is not None else "Could not save TAK metadata."
+                ),
                 cause=error,
             ) from error
 

@@ -18,7 +18,7 @@ from metadata_polisher.matching.release_scoring import MatchClassification
 from metadata_polisher.session.group_editing import set_disc_override
 from metadata_polisher.session.lookup_editing import set_search_query_override
 from metadata_polisher.session.mapping_editing import apply_manual_track_mapping
-from metadata_polisher.session.review_editing import apply_field_decision, set_rename_decision
+from metadata_polisher.session.review_editing import apply_field_decision, set_rename_decision, undo_last_review_action
 from metadata_polisher.session.state import ReviewedFileState
 from tests.unit.session.test_lookup_editing import make_selected_session
 
@@ -105,6 +105,20 @@ def test_same_provider_choice_survives_manual_mapping_confidence_change():
 
     changed = apply_manual_track_mapping(state, "album", resolved_mapping(state), RenameSettings())
     assert changed.groups[0].reviewed_files[0].change_set.final_metadata.title == "Overture"
+
+
+def test_undo_manual_title_after_mapping_restores_current_track_evidence():
+    state = partial_session()
+    file_id = state.groups[0].group.files[0].file_id
+    settings = RenameSettings()
+    manual = apply_field_decision(state, "album", file_id, MetadataField.TITLE,
+                                  FieldDecisionKind.USE_MANUAL, settings, manual_value="Independent title")
+    remapped = apply_manual_track_mapping(manual, "album", resolved_mapping(manual), settings)
+    undone = undo_last_review_action(remapped, settings)
+    expected = apply_manual_track_mapping(state, "album", resolved_mapping(state), settings)
+
+    assert undone.groups[0].reviewed_files == expected.groups[0].reviewed_files
+    assert undone.groups[0].manual_track_mapping == remapped.groups[0].manual_track_mapping
 
 
 @pytest.mark.parametrize("invalidate", [

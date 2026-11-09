@@ -99,6 +99,18 @@ def repeated_fixture(finding):
     return files, candidate
 
 
+def test_reversed_variations_do_not_default_select_each_others_performers():
+    files = (local(1, "Variation A", None), local(2, "Variation B", None))
+    lookup, selected = select(files, release(("Variation B", "Variation A"), (None, None)))
+
+    assert lookup.release_ranking.entries[0].result.classification is MatchClassification.HIGH
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS in selected.track_mapping.reason_codes
+    for reviewed in selected.reviewed_files:
+        artist = next(review for review in reviewed.reviews if review.field is MetadataField.ARTISTS)
+        assert artist.decision is not FieldDecisionKind.USE_PROPOSAL
+        assert reviewed.change_set.final_metadata.artists == ()
+
+
 @pytest.mark.parametrize("finding,score", [("R1", 100), ("R2", 85)])
 def test_ambiguous_identity_cannot_default_select_a_missing_performer(finding, score):
     files, candidate = repeated_fixture(finding)

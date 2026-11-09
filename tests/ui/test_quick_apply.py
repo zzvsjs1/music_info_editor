@@ -117,6 +117,25 @@ def test_summary_cancel_and_highlighting_never_submit(apply_ui):
     assert host.session_state is snapshot
 
 
+def test_summary_only_reserves_the_included_rename_destinations(qapp):
+    from metadata_polisher.session.review_editing import set_rename_decision
+    from tests.unit.session.test_review_editing import make_local_session, make_source
+
+    sources = (make_source("a.flac"), make_source("b.flac"))
+    ids = tuple(file.file_id for file in sources)
+    settings = RenameSettings(template="%title%")
+    state = set_rename_decision(make_local_session(*sources), "album", ids, RenameDecision.APPLY_RENAME, settings)
+    host = ApplyHost(state)
+    host.app_settings = replace(host.app_settings, rename=settings)
+    facade = QuickApply(host, ResultService())
+    assert facade.beginApply()
+    assert not facade.summaryCanApply
+    facade.cancelApply()
+    host.set_included_file_ids(frozenset(ids[:1]))
+    assert facade.beginApply()
+    assert facade.summaryCanApply
+
+
 @pytest.mark.parametrize("stale", [False, True])
 def test_apply_guidance_distinguishes_stale_files_from_unreviewed_files(apply_ui, stale):
     host, facade, _service = apply_ui

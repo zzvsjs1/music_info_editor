@@ -117,8 +117,8 @@ def _value_text(value: FieldValue) -> str:
 
 def _effective_script(value: FieldValue, declared_script: str | None) -> str | None:
     canonical_script = _canonical_script(declared_script)
-
-    if canonical_script is not None:
+    if canonical_script not in {None, "jpan", "hang", "han", "latn"}:
+        # The local classifier only recognises these four script families.
         return canonical_script
 
     value_text = _value_text(value)
@@ -131,18 +131,21 @@ def _effective_script(value: FieldValue, declared_script: str | None) -> str | N
     profile = build_language_profile((value_text,))
 
     if profile.preferred_language is Language.JAPANESE:
-        return "jpan"
+        observed = "jpan"
+    elif profile.preferred_language is Language.KOREAN:
+        observed = "hang"
+    elif profile.reason is LanguageProfileReason.HAN_WITHOUT_LANGUAGE_SIGNAL:
+        # Japanese titles can consist entirely of Han characters.
+        observed = "jpan" if canonical_script == "jpan" else "han"
+    elif profile.reason is LanguageProfileReason.LATIN_ONLY:
+        observed = "latn"
+    else:
+        return None
 
-    if profile.preferred_language is Language.KOREAN:
-        return "hang"
-
-    if profile.reason is LanguageProfileReason.HAN_WITHOUT_LANGUAGE_SIGNAL:
-        return "han"
-
-    if profile.reason is LanguageProfileReason.LATIN_ONLY:
-        return "latn"
-
-    return None
+    # A release-level script can disagree with an individual title. Keep its
+    # original label in the member's provenance; neither native spelling nor
+    # an explicitly supplied romanisation is established by that conflict.
+    return observed if canonical_script is None or canonical_script == observed else None
 
 
 def _value_key(value: FieldValue) -> tuple[object, ...]:
@@ -372,7 +375,7 @@ def _script_sort_rank(proposal: ConsolidatedProposal, effective_script: str | No
     if effective_script is None:
         return 0
 
-    proposal_script = _effective_script(proposal.value, proposal.script)
+    proposal_script = _canonical_script(proposal.script)
 
     if proposal_script == effective_script:
         return 0
@@ -395,7 +398,7 @@ def _matches_effective_dimensions(
         return False
 
     proposal_language = _comparison_language(proposal)
-    proposal_script = _effective_script(proposal.value, proposal.script)
+    proposal_script = _canonical_script(proposal.script)
 
     if effective_language is not None and proposal_language != effective_language:
         return False
@@ -519,9 +522,15 @@ def rank_proposals(
             distinct_scripts = {
                 script
                 for proposal in copied
-                if (script := _effective_script(proposal.value, proposal.script)) is not None
+                if (script := _canonical_script(proposal.script)) is not None
             }
-            ambiguous = len(distinct_languages) > 1 or len(distinct_scripts) > 1
+            # A sole supplied value can still have conflicting script
+            # evidence, even when the local library has no style preference.
+            unconfirmed_script = any(
+                proposal.script is None and any(member.script for member in proposal.members)
+                for proposal in copied
+            )
+            ambiguous = unconfirmed_script or len(distinct_languages) > 1 or len(distinct_scripts) > 1
             reasons = _ordered_reason_union(reasons, (ReviewReasonCode.LANGUAGE_UNAVAILABLE,))
     else:
         reasons = _ordered_reason_union(reasons, (ReviewReasonCode.LANGUAGE_OVERRIDE,))
@@ -851,31 +860,6 @@ def _metadata_value(file: LocalMediaFile, field: MetadataField) -> FieldValue | 
     return metadata_value(file.read_result.metadata, field)
 
 
-def _existing_value(file: LocalMediaFile, field: MetadataField) -> FieldValue | None:
-    read_state = file.read_result.field_states[field]
-
-    if read_state is FieldReadState.MISSING:
-        return None
-
-    value = _metadata_value(file, field)
-    has_semantic_value = (
-        (isinstance(value, str) and bool(value.strip()))
-        or (isinstance(value, tuple) and bool(value))
-        or (
-            isinstance(value, Position)
-            and (value.number is not None or value.total is not None)
-        )
-    )
-
-    if has_semantic_value:
-        return value
-
-    if read_state is FieldReadState.PRESENT:
-        raise ValueError(f"present field {field.value} has no semantic value")
-
-    return None
-
-
 def _position_with_existing_components(
     file: LocalMediaFile,
     field: MetadataField,
@@ -885,7 +869,7 @@ def _position_with_existing_components(
     if file.read_result.field_states[field] is not FieldReadState.PRESENT:
         return proposed
 
-    existing = _existing_value(file, field)
+    existing = file.read_result.existing_value(field)
 
     if not isinstance(existing, Position):
         return proposed
@@ -1175,7 +1159,7 @@ def build_selected_file_results(
             build_field_review_state(
                 field=field,
                 read_state=file.read_result.field_states[field],
-                existing_value=_existing_value(file, field),
+                existing_value=file.read_result.existing_value(field),
                 proposals=proposals_by_field[field],
                 preferred_language=preferred_language,
                 local_texts=group_local_texts.get(field, ()),

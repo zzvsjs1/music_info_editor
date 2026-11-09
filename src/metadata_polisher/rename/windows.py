@@ -107,7 +107,7 @@ _INVALID_CHARACTER_TRANSLATION = str.maketrans(
 )
 
 _INVALID_VISIBLE_CHARACTERS = frozenset('<>:"/\\|?*')
-_RESERVED_EXACT_NAMES = frozenset({"con", "prn", "aux", "nul"})
+_RESERVED_EXACT_NAMES = frozenset({"con", "prn", "aux", "nul", "conin$", "conout$"})
 _MAX_COMPONENT_UTF16_UNITS = 255
 
 
@@ -131,7 +131,8 @@ def _is_reserved_device_name(name: str) -> bool:
         return True
 
     if len(base_name) == 4 and base_name[:3] in {"com", "lpt"}:
-        return base_name[3] in "123456789"
+        # Win32 also recognises the three ISO-8859-1 superscript digits.
+        return base_name[3] in "123456789¹²³"
 
     return False
 

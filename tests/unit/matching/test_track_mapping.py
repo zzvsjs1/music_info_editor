@@ -20,12 +20,11 @@ from metadata_polisher.matching.release_scoring import MatchClassification, Matc
 from metadata_polisher.matching.track_mapping import (
     TrackMappingResult,
     _align_segment,
-    _ambiguous_locals,
     _anchor_candidates,
     _AssessmentMatrix,
     _build_assessment_matrix,
-    _feasible_segment_pairs,
     _PairIndex,
+    _segment_candidates,
     map_tracks,
 )
 
@@ -341,6 +340,38 @@ def test_sequence_alignment_never_crosses_mappings() -> None:
     provider_indexes = tuple(mapping.provider_track_index for mapping in result.mappings)
     assert provider_indexes == tuple(sorted(provider_indexes))
     assert len(result.mappings) == 1
+
+
+def test_crossing_exact_titles_cannot_approve_weaker_same_order_pairs() -> None:
+    local = tuple(
+        make_local(name, title=title, tagged_number=None, duration=None)
+        for name, title in (("a", "Prelude"), ("b", "Variation A"), ("c", "Variation B"), ("d", "Finale"))
+    )
+    release = make_release(*(make_provider(None, title, duration=None) for title in (
+        "Prelude", "Variation B", "Variation A", "Finale",
+    )))
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert result.classification is MatchClassification.REVIEW
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS in result_codes(result)
+    assert {(m.local_file_id, m.provider_track_index) for m in result.mappings
+            if m.classification is MatchClassification.HIGH} == {("a", 0), ("d", 3)}
+    assert set(mapping_pairs(result)) <= {("a", 0), ("b", 2), ("c", 1), ("d", 3)}
+
+
+def test_conflicting_printed_numbers_cannot_disambiguate_identical_tracks() -> None:
+    local = tuple(make_local(str(i), title="Interlude", tagged_number=i) for i in (1, 2))
+    release = make_release(
+        replace(make_provider(1, "Interlude"), printed_number="2"),
+        replace(make_provider(2, "Interlude"), printed_number="1"),
+    )
+
+    result = map_tracks(local, release, selected_medium_index=0)
+
+    assert result.mappings == ()
+    assert result.unmatched_provider_indexes == (0, 1)
+    assert MatchReasonCode.TRACK_MAPPING_AMBIGUOUS in result_codes(result)
 
 
 # A single visible row establishes a total of one, but does not establish
@@ -679,10 +710,8 @@ def test_segment_objective_matches_independent_enumeration_of_250_native_cases()
             "provider_start": 0,
             "provider_end": provider_count,
         }
-        feasible = _feasible_segment_pairs(matrix, **bounds, policy=policy)
-        ambiguous = _ambiguous_locals(matrix, **bounds, policy=policy)
-        allowed = frozenset((pair.local_index, pair.provider_index) for pair in feasible
-                            if pair.local_index not in ambiguous)
+        candidates = _segment_candidates(matrix, **bounds, policy=policy)
+        allowed = frozenset((pair.local_index, pair.provider_index) for pair in candidates.permitted)
 
         # Only pair eligibility comes from production. Enumerate the objective
         # independently; the separate named fixtures above test whether those
@@ -697,7 +726,7 @@ def test_segment_objective_matches_independent_enumeration_of_250_native_cases()
         actual = tuple((pair.local_index, pair.provider_index) for pair in alignment.pairs)
 
         assert actual == expected, f"Native alignment case {case}: {local_count} by {provider_count}"
-        assert alignment.ambiguous_local_indexes == ambiguous
+        assert alignment.ambiguous_local_indexes == candidates.ambiguous_local_indexes
 
 
 @pytest.mark.parametrize("missing", [None, 1, 20, 40])

@@ -44,6 +44,7 @@ from metadata_polisher.session.review_editing import (
     review_undo_targets,
     undo_last_review_action,
 )
+from metadata_polisher.session.review_previews import scoped_change_sets
 from metadata_polisher.session.state import (
     GroupSelection,
     GroupState,
@@ -489,12 +490,7 @@ class QuickBackend(QObject):
         # Reuse the final confirmation's pure counter so a mere inclusion or a
         # filename preview cannot be described as a pending write. No request,
         # transaction, or confirmation is created by reading this presentation.
-        changes = tuple(
-            file.change_set
-            for group in self.session_state.groups
-            for file in group.reviewed_files
-            if file.file_id in self._included and file.change_set is not None
-        )
+        changes = scoped_change_sets(self.session_state, self._included)
 
         return build_apply_summary(
             changes,

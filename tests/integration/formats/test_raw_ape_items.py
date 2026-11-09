@@ -63,6 +63,95 @@ def test_ape_raw_keys_text_values_and_binary_items_follow_documented_conventions
     assert raw["Cover Art (Front)"] == (2, b"cover.png\x00binary sentinel")
 
 
+@pytest.mark.parametrize("protected", ("edited item", "footer", "header"))
+def test_read_only_ape_flags_survive_an_attempted_title_edit(tmp_path, protected) -> None:
+    path = tmp_path / "readonly-ape.tak"
+    tags = APEv2()
+    tags["Title"] = "Before"
+    tags["Cover Art (Front)"] = b"cover.png\x00binary sentinel"
+    tags.save(path)
+    content = bytearray(path.read_bytes())
+    offsets = {"edited item": content.index(b"Title\0") - 4, "footer": len(content) - 12, "header": 20}
+    content[offsets[protected]] |= 1
+    path.write_bytes(content)
+
+    class PersistedApeFile(FakeTakFile):
+        def save(self):
+            self.tags.save(path)
+
+    adapter = TakAdapter(loader=lambda _: PersistedApeFile(APEv2(path)))
+    with pytest.raises(MediaFormatError, match="read-only") as error:
+        adapter.write_changes(path, (MetadataChange(MetadataField.TITLE, "Before", "After"),))
+
+    assert error.value.issue.code is MediaErrorCode.TAG_WRITE_FAILED
+    assert path.read_bytes() == content
+
+
+def test_edit_preserves_read_only_flag_and_raw_bytes_of_unmanaged_cover(tmp_path) -> None:
+    path = tmp_path / "protected-cover.tak"
+    tags = APEv2()
+    tags["Title"] = "Before"
+    tags["Cover Art (Front)"] = b"cover.png\0\xff\x00\xce" * 99
+    tags.save(path)
+    content = bytearray(path.read_bytes())
+    content[content.index(b"Cover Art (Front)\0") - 4] |= 1
+    path.write_bytes(content)
+    original_cover = _raw_ape_items(path)["Cover Art (Front)"]
+
+    class PersistedApeFile(FakeTakFile):
+        def save(self):
+            self.tags.save(path)
+
+    TakAdapter(loader=lambda _: PersistedApeFile(APEv2(path))).write_changes(
+        path, (MetadataChange(MetadataField.TITLE, "Before", "After"),)
+    )
+    raw = _raw_ape_items(path)
+    assert raw["Title"] == (0, b"After")
+    assert raw["Cover Art (Front)"] == original_cover
+
+
+def test_changed_protected_payload_rejects_rendered_tag_before_replacing_any_bytes(tmp_path) -> None:
+    path = tmp_path / "protected-cover.tak"
+    tags = APEv2()
+    tags["Title"] = "Before"
+    tags["Cover Art (Front)"] = b"original cover"
+    tags.save(path)
+    raw = bytearray(path.read_bytes())
+    raw[raw.index(b"Cover Art (Front)\0") - 4] |= 1
+    path.write_bytes(raw)
+
+    def bad_loader(_):
+        # Simulate a codec that cannot round-trip a protected payload.
+        rewritten = APEv2(path)
+        rewritten["Cover Art (Front)"] = b"modified cover"
+        return FakeTakFile(rewritten)
+
+    adapter = TakAdapter(loader=bad_loader)
+    with pytest.raises(MediaFormatError, match="protected APEv2 item"):
+        adapter.write_changes(path, (MetadataChange(MetadataField.TITLE, "Before", "After"),))
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("invalid", ("footer size", "record size", "reserved header bytes"))
+def test_malformed_ape_tag_remains_byte_identical(tmp_path, invalid) -> None:
+    path = tmp_path / "invalid-tag.tak"
+    tags = APEv2()
+    tags["Title"] = "Before"
+    tags.save(path)
+    raw = bytearray(path.read_bytes())
+    if invalid == "footer size":
+        struct.pack_into("<I", raw, len(raw) - 20, len(raw) + 1)
+    elif invalid == "record size":
+        struct.pack_into("<I", raw, 32, 0xFFFFFFFF)
+    else:
+        raw[25] = 1
+    path.write_bytes(raw)
+    adapter = TakAdapter(loader=lambda _: FakeTakFile(APEv2(path)))
+    with pytest.raises(MediaFormatError, match="APEv2"):
+        adapter.write_changes(path, (MetadataChange(MetadataField.TITLE, "Before", "After"),))
+    assert path.read_bytes() == raw
+
+
 @pytest.mark.parametrize("tail_kind", ("id3v1", "lyrics3_id3v1", "lyrics3"))
 def test_ape_edits_block_unmanaged_legacy_tails_before_mutagen_can_remove_them(tmp_path, tail_kind) -> None:
     path = tmp_path / "legacy-tail.ape"

@@ -250,8 +250,8 @@ def test_non_zero_result_heading_with_changed_layout_is_invalid() -> None:
     assert caught.value.code is ProviderErrorCode.INVALID_RESPONSE
 
 
-@pytest.mark.parametrize("status_code", [200, 403])
-# A browser challenge can arrive with HTTP 200 as well as 403. Neither is a
+@pytest.mark.parametrize("status_code", [200, 403, 503])
+# A browser challenge can also arrive as a 503. None of these responses is a
 # successful empty catalogue search and neither should enter the result cache.
 def test_access_challenge_becomes_typed_access_denied(status_code: int) -> None:
     provider, client, _ = make_provider(

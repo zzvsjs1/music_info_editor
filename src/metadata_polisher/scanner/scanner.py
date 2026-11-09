@@ -10,7 +10,11 @@ from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import LocalMediaFile, UnsupportedMediaFile
 from metadata_polisher.execution.cancellation import CancellationToken, NeverCancelledToken
 from metadata_polisher.formats.base import MediaFormatAdapter, MediaFormatError
-from metadata_polisher.infrastructure.filesystem import read_file_version
+from metadata_polisher.infrastructure.filesystem import (
+    RECOVERY_DIRECTORY_PREFIX,
+    STAGING_FILE_PREFIX,
+    read_file_version,
+)
 from metadata_polisher.scanner.filename_hints import extract_filename_hints
 
 
@@ -121,10 +125,17 @@ def scan_media(
     # entries visible instead of presenting an incomplete scan as success.
     for directory, directory_names, file_names in root.walk(on_error=discovery_failed):
         active_cancellation.raise_if_cancelled()
+        # Retained transaction output is evidence for manual recovery. Pruning
+        # its subtree also keeps original-looking media names out of Apply.
+        directory_names[:] = [
+            name for name in directory_names if not name.casefold().startswith(RECOVERY_DIRECTORY_PREFIX)
+        ]
         directory_names.sort(key=lambda name: (name.casefold(), name))
 
         for name in sorted(file_names, key=lambda name: (name.casefold(), name)):
             active_cancellation.raise_if_cancelled()
+            if name.casefold().startswith(STAGING_FILE_PREFIX):
+                continue
             path = directory / name
 
             try:

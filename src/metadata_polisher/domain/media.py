@@ -7,7 +7,14 @@ from pathlib import Path
 from types import MappingProxyType
 
 from metadata_polisher.domain.errors import Issue
-from metadata_polisher.domain.metadata import FieldReadState, MetadataField, MetadataSnapshot
+from metadata_polisher.domain.metadata import (
+    FieldReadState,
+    FieldValue,
+    MetadataField,
+    MetadataSnapshot,
+    Position,
+    metadata_value,
+)
 
 
 class FilenameHintConfidence(Enum):
@@ -83,6 +90,21 @@ class MediaReadResult:
         # adapter cannot later change the domain result through retained containers.
         object.__setattr__(self, "field_states", MappingProxyType(copied_states))
         object.__setattr__(self, "issues", tuple(self.issues))
+
+    def existing_value(self, field: MetadataField) -> FieldValue | None:
+        """Keep physically present whitespace as evidence for Keep, Clear and replacement."""
+        state = self.field_states[field]
+        if state is FieldReadState.MISSING:
+            return None
+
+        value = metadata_value(self.metadata, field)
+        if value is not None and value != "" and value != () and value != Position():
+            return value
+
+        if state is FieldReadState.PRESENT:
+            raise ValueError(f"present field {field.value} has no semantic value")
+
+        return None
 
 
 # Device, file identity, size and nanosecond timestamps form a cheap local

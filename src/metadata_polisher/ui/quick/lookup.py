@@ -360,6 +360,14 @@ class QuickLookup(QObject):
         group = self._host._group()
         return bool(self._idle() and group is not None and group.candidate_lookup is not None)
 
+    def _searchable(self, group: GroupState) -> bool:
+        return is_group_searchable(group, self._host.app_settings.providers.selected_provider_id)
+
+    def _incomplete_groups(self) -> tuple[str, ...]:
+        return incomplete_searchable_group_ids(
+            self._host.session_state, self._host.app_settings.providers.selected_provider_id,
+        )
+
     def _language(self) -> str:
         group = self._host._group()
         return (group.language_override or "") if group is not None else ""
@@ -373,7 +381,7 @@ class QuickLookup(QObject):
         lambda self: (
             self._idle()
             and any(
-                group.group.group_id in self._host.selected_group_ids and is_group_searchable(group)
+                group.group.group_id in self._host.selected_group_ids and self._searchable(group)
                 for group in self._host.session_state.groups
             )
         ),
@@ -381,7 +389,7 @@ class QuickLookup(QObject):
     )
     canFindAll = Property(
         bool,
-        lambda self: self._idle() and bool(incomplete_searchable_group_ids(self._host.session_state)),
+        lambda self: self._idle() and bool(self._incomplete_groups()),
         notify=changed,
     )
     canChoose = Property(bool, _can_choose, notify=changed)
@@ -439,7 +447,7 @@ class QuickLookup(QObject):
         selected = tuple(
             group for group in self._host.session_state.groups if group.group.group_id in self._host.selected_group_ids
         )
-        searchable = tuple(group for group in selected if is_group_searchable(group))
+        searchable = tuple(group for group in selected if self._searchable(group))
         if not searchable:
             self._host.set_status("Select searchable groups with usable local evidence that do not need a rescan.")
             return
@@ -452,7 +460,7 @@ class QuickLookup(QObject):
     @Slot()
     def findAll(self) -> None:
         if self._idle():
-            self._start_queue(incomplete_searchable_group_ids(self._host.session_state), 0)
+            self._start_queue(self._incomplete_groups(), 0)
 
     def _start_queue(self, group_ids: tuple[str, ...], skipped: int) -> None:
         self._queue = deque(group_ids)
@@ -466,7 +474,7 @@ class QuickLookup(QObject):
         while self._queue:
             group_id = self._queue.popleft()
             group = next((item for item in self._host.session_state.groups if item.group.group_id == group_id), None)
-            if group is None or not is_group_searchable(group):
+            if group is None or not self._searchable(group):
                 self._queue_skipped += 1
                 self._queue_total -= 1
                 continue
@@ -485,7 +493,7 @@ class QuickLookup(QObject):
         )
 
     def _submit(self, group: GroupState, identity: ReleaseMediumIdentity | None = None) -> bool:
-        if not self._idle() or not is_group_searchable(group):
+        if not self._idle() or group.requires_rescan or (identity is None and not self._searchable(group)):
             return False
 
         host = self._host
@@ -751,6 +759,10 @@ class QuickLookup(QObject):
                 artists=tuple(value.strip() for value in artists.split(";") if value.strip()),
                 year=year or None,
             )
+            if query != self._search_query:
+                # An edited search sends only the filters the user can see.
+                # Local track count still contributes to scoring the results.
+                query = replace(query, local_track_count=0)
             state = set_search_query_override(
                 self._search_state,
                 self._search_group_id,

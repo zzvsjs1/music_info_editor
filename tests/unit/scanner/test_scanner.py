@@ -15,6 +15,7 @@ from metadata_polisher.domain.media import (
 )
 from metadata_polisher.domain.metadata import FieldReadState, MetadataField, MetadataSnapshot
 from metadata_polisher.formats.base import MediaFormatError
+from metadata_polisher.infrastructure.filesystem import LocalFileSystem, ReplacementRecoveryError, read_file_version
 from metadata_polisher.scanner.scanner import ScanResult, scan_media
 
 
@@ -89,6 +90,31 @@ class FakeRegistry:
 def touch(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"local fixture")
+
+
+def test_scan_omits_transaction_recovery_and_staging_but_keeps_other_hidden_media(tmp_path: Path) -> None:
+    original = tmp_path / "original.wav"
+    hidden_track = tmp_path / ".metadata-polisher-concert.wav"
+    hidden_album = tmp_path / ".outtakes" / "demo.wav"
+    for path in (original, hidden_track, hidden_album):
+        touch(path)
+
+    filesystem = LocalFileSystem()
+    staging = filesystem.create_temporary_sibling(original)
+    touch(staging)
+    with pytest.raises(ReplacementRecoveryError), filesystem.replacement_recovery_path(original) as recovery:
+        touch(recovery)
+        unsupported = recovery.parent / "rare.opus"
+        touch(unsupported)
+        raise ReplacementRecoveryError("Retain the recovered media for inspection.")
+
+    adapter = FakeReadAdapter("wav", make_read_result("Title"))
+    registry = FakeRegistry({path: adapter for path in (original, hidden_track, hidden_album)}, frozenset({".wav"}))
+    scan = scan_media(tmp_path, registry)
+    assert set(registry.detected_paths) == {original, hidden_track, hidden_album}
+    assert {file.path for file in scan.supported_files} == {original, hidden_track, hidden_album}
+    assert not scan.unsupported_files and not scan.issues and scan.complete
+    assert staging.is_file() and recovery.is_file()
 
 
 # Create files out of order and include ignored formats. The expected order
@@ -325,15 +351,7 @@ def test_scan_captures_the_version_of_the_file_it_read(tmp_path: Path) -> None:
     )
 
     result = scan_media(tmp_path, registry)
-    stat = path.stat()
-
-    assert result.supported_files[0].file_version == (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_size,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-    )
+    assert result.supported_files[0].file_version == read_file_version(path)
     assert result.issues == ()
 
 

@@ -233,6 +233,24 @@ def test_search_draft_rejects_stale_session_and_preserves_other_query_hints(look
     assert query.artists == ("Artist One", "Artist Two")
     assert query.year == 2024
     assert query.distinctive_titles
+    assert query.local_track_count == 0  # This invisible filter would exclude partially owned albums.
+
+
+@pytest.mark.parametrize(("provider_id", "artists", "searchable"), [
+    ("musicbrainz_direct", (), False), ("vgmdb", (), False),
+    ("musicbrainz_direct", ("Artist",), True), ("vgmdb", ("Artist",), False),
+])
+def test_search_actions_require_evidence_the_selected_provider_can_send(lookup, provider_id, artists, searchable):
+    host, facade, _ = lookup
+    host.app_settings = replace(host.app_settings, providers=replace(host.app_settings.providers,
+                                                                    selected_provider_id=provider_id))
+    group = replace(make_group(make_media_file("one.flac", title="Opening", artists=artists)), album_title=None)
+    host.set_state(replace(host.session_state, groups=(GroupState(group=group),)))
+    assert facade.canFind is searchable
+    assert facade.canFindAll is searchable
+    if not searchable:
+        facade.findSelected()
+        assert not host.executor.pending
 
 
 def test_mapping_draft_only_publishes_after_acceptance(qapp):

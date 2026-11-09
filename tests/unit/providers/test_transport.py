@@ -311,6 +311,31 @@ def test_excessive_retry_after_is_not_clamped_to_an_earlier_retry() -> None:
     assert caught.value.context.retry_after_seconds == 999999.0
 
 
+def test_later_album_respects_the_same_providers_cooldown() -> None:
+    clock = FakeClock()
+    starts = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        starts.append(clock.now)
+        if len(starts) == 1:
+            return httpx.Response(429, headers={"Retry-After": "120"})
+        return httpx.Response(200, json={})
+
+    transport, client, _ = make_transport(handler, clock=clock)
+    with client:
+        with pytest.raises(ProviderTransportError):
+            transport.get_json("https://provider.invalid/first")
+
+        with pytest.raises(ProviderTransportError) as pending:
+            transport.get_json("https://provider.invalid/next")
+
+        assert pending.value.code is ProviderErrorCode.RATE_LIMITED
+        assert starts == [0.0]
+        clock.now = 119.0
+        assert transport.get_json("https://provider.invalid/next") == {}
+        assert starts == [0.0, 120.0]
+
+
 @pytest.mark.parametrize("delay_seconds", [4, 60])
 def test_http_date_retry_after_is_honoured_without_retrying_early(
     delay_seconds: int,

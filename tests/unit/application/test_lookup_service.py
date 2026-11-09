@@ -742,6 +742,21 @@ def test_search_and_rank_hydrates_real_media_and_keeps_ambiguous_candidates_unse
     )
 
 
+def test_data_only_disc_preserves_audio_disc_identity_in_lookup() -> None:
+    sparse = make_candidate("provider", "two-discs")
+    basic = replace(sparse, media=(
+        replace(make_medium(medium_number=1), has_data_tracks=True, declared_track_count=0),
+        make_medium("Opening", medium_number=2),
+    ))
+    provider = LookupFakeProvider("provider", (sparse,), basic_candidates={sparse.release_id: basic})
+    service = LookupService(ProviderCoordinator((provider,)))
+    result = service.search_and_rank_group(make_group(make_media_file("one.flac", title="Opening")), lookup_context())
+
+    assert result.hydration_notices == ()
+    assert result.release_ranking.identities == (("provider", "provider", "two-discs", 1),)
+    assert result.release_ranking.entries[0].release.disc_total == 2
+
+
 def make_candidate_lookup_result() -> CandidateLookupResult:
     sparse = make_candidate("provider", "release-1")
     provider = LookupFakeProvider(

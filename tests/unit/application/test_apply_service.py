@@ -431,6 +431,28 @@ def test_batch_blocker_preserves_true_no_change_outcome() -> None:
     ]
 
 
+def test_directory_preflight_lists_each_parent_once_per_apply() -> None:
+    class Probe(LocalApplyPathProbe):
+        def __init__(self):
+            self.listings = []
+
+        def directory_names(self, path):
+            self.listings.append(path)
+            return ("occupied.flac",)
+
+    probe = Probe()
+    inspector = LocalApplyPreflightInspector(probe=probe)
+    service = ApplyService(preflight=inspector, writer=object())  # Missing sources block every write.
+    requests = tuple(
+        make_file_request(str(i), f"library/a/{i}.flac", rename_decision=RenameDecision.APPLY_RENAME)
+        for i in range(8)
+    )
+    batch = make_batch((ApplyGroupRequest("one", 0, None, requests),))
+    for _ in range(2):
+        assert service.apply(batch, cancellation=NeverCancelledToken()).status is ApplyBatchStatus.FAILED
+    assert probe.listings == [Path("library/a")] * 2
+
+
 def test_case_insensitive_cross_request_destination_collision_blocks_whole_batch() -> None:
     inspected_destinations: list[Path] = []
     adapter = StubAdapter()
