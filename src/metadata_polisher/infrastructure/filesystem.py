@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Protocol
 
 from metadata_polisher.domain.media import FileVersion
+from metadata_polisher.rename.windows import STAGING_FILE_PREFIX
 
-STAGING_FILE_PREFIX = ".metadata-polisher-staging-"
 RECOVERY_DIRECTORY_PREFIX = ".metadata-polisher-recovery-"
 
 if sys.platform == "win32":
@@ -20,6 +20,7 @@ if sys.platform == "win32":
         delete_on_close,
         open_file_identity,
         open_guard,
+        open_write_probe,
         replace_with_recovery,
     )
     from metadata_polisher.infrastructure.windows_file_version import change_time_ns
@@ -41,9 +42,15 @@ def read_file_version(path: Path) -> FileVersion:
 
 
 def source_is_writable(path: Path) -> bool:
-    """Include the Windows read-only attribute, even for an administrator."""
+    """Require data-write access to the source, even when its directory allows replacement."""
     try:
-        return bool(path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)) and os.access(path, os.W_OK)
+        if sys.platform == "win32":
+            # os.access(W_OK) only checks the DOS read-only attribute on Windows.
+            with open_write_probe(path):
+                return True
+        else:
+            write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+            return bool(path.stat().st_mode & write_bits) and os.access(path, os.W_OK)
     except OSError:
         return False
 

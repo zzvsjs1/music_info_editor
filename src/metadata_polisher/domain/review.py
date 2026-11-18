@@ -284,6 +284,14 @@ class FieldReviewState:
     requires_review: bool
     reason_codes: tuple[ReviewReasonCode, ...]
 
+    @property
+    def needs_new_candidate_decision(self) -> bool:
+        """An approval lost its source association and needs an explicit new choice."""
+        return (
+            self.decision is FieldDecisionKind.UNRESOLVED
+            and ReviewReasonCode.CANDIDATE_DEPENDENCY_CHANGED in self.reason_codes
+        )
+
     def __post_init__(self) -> None:
         if not isinstance(self.field, MetadataField):
             raise TypeError("field must be a MetadataField")

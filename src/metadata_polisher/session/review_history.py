@@ -4,6 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from metadata_polisher.application.changes import RenameDecision
+from metadata_polisher.application.review import require_new_candidate_decision
+from metadata_polisher.domain.metadata import MetadataField
+from metadata_polisher.domain.review import DecisionOrigin
 from metadata_polisher.infrastructure.settings import RenameSettings
 from metadata_polisher.session.review_previews import (
     complete_reviewed_files_by_id,
@@ -70,8 +73,25 @@ def project_group_review_undo(
     """Project both sides of each retained action onto the current provider evidence."""
     sources = {source.file_id: source for source in group.group.files}
     history: list[ReviewUndoEntry] = []
+    invalidated: set[tuple[str, MetadataField]] = set()
 
-    for entry in state.review_undo:
+    def project_snapshot(previous: ReviewedFileState) -> ReviewedFileState:
+        projected = project(previous)
+        fields = []
+        for review in projected.reviews:
+            key = (projected.file_id, review.field)
+            if review.needs_new_candidate_decision:
+                invalidated.add(key)
+            elif review.decision_origin is DecisionOrigin.DEFAULT and key in invalidated:
+                review = require_new_candidate_decision(review)
+            fields.append(review)
+
+        return replace(projected, reviews=tuple(fields), change_set=None)
+
+    # Walk in Undo order, from each action's result back to its prior state.
+    # An obsolete approval can cover an earlier manual edit. Undo may restore
+    # that edit, but undoing it in turn must still require review of the new track.
+    for entry in reversed(state.review_undo):
         retained: list[ReviewUndoFile] = []
 
         for item in entry.files:
@@ -86,28 +106,26 @@ def project_group_review_undo(
             if group.requires_rescan or source != item.source:
                 continue
 
-            projected = []
+            after = project_snapshot(item.after)
+            before = project_snapshot(item.before)
+            before_rename, after_rename = rename_intent(item.before), rename_intent(item.after)
+            if before.reviews == after.reviews and (before_rename is after_rename or not rename_settings.enabled):
+                continue
 
-            for previous in (item.before, item.after):
-                # Use the live-field transform on both sides, so sequential
-                # actions remain a chain. Merely relaxing Undo's equality check
-                # would instead restore old proposal ordering and reason codes.
-                # Rebuild each side separately: two snapshots of one file are
-                # different moments, never a two-file rename destination set.
-                rebuilt = rebuild_reviewed_files(
-                    state, group, (project(previous),), rename_settings,
-                    rename_decisions={source.file_id: rename_intent(previous)},
-                )
-                projected.append(rebuilt[0])
-
-            before, after = projected
-            if before.reviews != after.reviews or rename_intent(before) is not rename_intent(after):
-                retained.append(ReviewUndoFile(source, before, after))
+            # Render each side separately. The two snapshots belong to the same
+            # file at different moments and must not reserve each other's names.
+            (before,) = rebuild_reviewed_files(
+                state, group, (before,), rename_settings, rename_decisions={source.file_id: before_rename},
+            )
+            (after,) = rebuild_reviewed_files(
+                state, group, (after,), rename_settings, rename_decisions={source.file_id: after_rename},
+            )
+            retained.append(ReviewUndoFile(source, before, after))
 
         if retained:
             history.append(ReviewUndoEntry(tuple(retained)))
 
-    return tuple(history)
+    return tuple(reversed(history))
 
 
 def next_review_undo_action(state: SessionState) -> NextReviewUndoAction:

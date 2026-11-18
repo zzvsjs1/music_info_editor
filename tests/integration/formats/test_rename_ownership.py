@@ -2,6 +2,7 @@
 
 import os
 import stat
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -163,6 +164,32 @@ def test_failed_final_verification_cannot_remove_a_later_replacement(tmp_path, m
     assert result.final_path == source.path
     assert source.path.read_bytes() == b"owned"
     assert destination.read_bytes() == b"external"
+
+
+def test_failed_verification_reports_retained_destination_when_a_reader_prevents_removal(tmp_path):
+    source = make_source(tmp_path / "source.flac")
+    source.path.write_bytes(b"owned")
+    destination = tmp_path / "renamed.flac"
+
+    with ExitStack() as reader:
+        class FailPublishedVerification(PayloadVerifier):
+            def verify(self, path, expected, changed_fields, baseline):
+                if path == destination:
+                    # A normal Windows reader allows verification to finish but
+                    # prevents the rollback from obtaining DELETE access.
+                    reader.enter_context(path.open("rb"))
+                    return VerificationResult(ok=False)
+
+                return super().verify(path, expected, changed_fields, baseline)
+
+        result = TransactionalFileWriter().apply_file(
+            source, make_rename_only_change_set(source, destination), FailPublishedVerification(),
+            disabled_backup(), NeverCancelledToken(), RecordingEventSink(),
+        )
+
+    assert result.status is FileApplyStatus.FAILED
+    assert result.final_path == destination
+    assert source.path.read_bytes() == destination.read_bytes() == b"owned"
 
 
 def test_rename_through_a_file_symlink_preserves_its_target(tmp_path):

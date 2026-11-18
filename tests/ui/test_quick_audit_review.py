@@ -80,6 +80,32 @@ def test_filename_previews_distinguish_the_same_name_across_albums(audit_backend
     assert not backend.executor.pending
 
 
+def test_open_filename_review_follows_rename_reservations_when_inclusion_changes(audit_backend):
+    from metadata_polisher.application.changes import RenameDecision
+    from metadata_polisher.infrastructure.settings import RenameSettings
+    from metadata_polisher.session.review_editing import set_rename_decision
+    from tests.unit.session.test_review_editing import make_local_session, make_source
+
+    sources = (make_source("a.flac"), make_source("b.flac"))
+    ids = tuple(file.file_id for file in sources)
+    state = set_rename_decision(make_local_session(*sources), "album", ids, RenameDecision.APPLY_RENAME,
+                                RenameSettings(template="%title%"))
+    backend = audit_backend(state)
+    backend.selectFile(ids[0], False)
+    backend.set_included_file_ids(frozenset(ids))
+    backend.applyUi.showPreviews()
+    assert "collides" in backend.applyUi.previewRows[0]["validation"]
+    assert backend.filenameNeedsAttention
+
+    backend.set_included_file_ids(frozenset(ids[:1]))
+    assert backend.applyUi.previewRows[0]["validation"] == "Ready"
+    backend.setReviewScope("included")
+    assert not backend.filenameNeedsAttention
+    assert "Blocked" not in backend.renameValidation
+    backend.setReviewScope("library")
+    assert all("collides" in row["validation"] for row in backend.applyUi.previewRows)
+
+
 def test_final_confirmation_qml_details_retain_paths_and_before_after_values(audit_backend, qtbot):
     backend = audit_backend(_same_named_files())
     warnings = []

@@ -117,7 +117,8 @@ def test_summary_cancel_and_highlighting_never_submit(apply_ui):
     assert host.session_state is snapshot
 
 
-def test_summary_only_reserves_the_included_rename_destinations(qapp):
+@pytest.fixture
+def competing_renames(qapp):
     from metadata_polisher.session.review_editing import set_rename_decision
     from tests.unit.session.test_review_editing import make_local_session, make_source
 
@@ -127,13 +128,34 @@ def test_summary_only_reserves_the_included_rename_destinations(qapp):
     state = set_rename_decision(make_local_session(*sources), "album", ids, RenameDecision.APPLY_RENAME, settings)
     host = ApplyHost(state)
     host.app_settings = replace(host.app_settings, rename=settings)
-    facade = QuickApply(host, ResultService())
+    return host, QuickApply(host, ResultService()), ids
+
+
+def test_summary_only_reserves_the_included_rename_destinations(competing_renames):
+    host, facade, ids = competing_renames
     assert facade.beginApply()
     assert not facade.summaryCanApply
     facade.cancelApply()
     host.set_included_file_ids(frozenset(ids[:1]))
     assert facade.beginApply()
     assert facade.summaryCanApply
+
+
+def test_rename_dialogue_uses_prior_inclusion_and_current_choices(competing_renames):
+    host, facade, ids = competing_renames
+    host._selected = ids[:1]
+
+    host.set_included_file_ids(frozenset(ids[1:]))
+    assert facade.beginRename()
+    assert not facade.renameCanAccept
+    facade.cancelRename()
+
+    host.set_included_file_ids(frozenset())
+    assert facade.beginRename() and facade.renameCanAccept
+    assert facade.renameRows[0]["validation"] == "Ready"
+    assert facade.acceptRename() and facade.summaryCanApply
+    assert host._included == {ids[0]}
+    assert not host.executor.pending
 
 
 @pytest.mark.parametrize("stale", [False, True])

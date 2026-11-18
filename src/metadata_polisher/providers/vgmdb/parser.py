@@ -1,10 +1,12 @@
 """Pure parsing of public VGMdb HTML into provider-neutral models."""
 
+import heapq
 import re
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from graphlib import CycleError, TopologicalSorter
 from html.parser import HTMLParser
 from typing import Literal
 from urllib.parse import urljoin, urlsplit
@@ -592,6 +594,34 @@ def _merge_track_variant(
         merged_track.titles.append(title)
 
 
+def _ordered_track_keys(predecessors: dict[_TrackKey, set[_TrackKey]]) -> tuple[_TrackKey, ...]:
+    """Keep the order supplied by each view, preferring first appearance for ties."""
+    first_seen = tuple(predecessors)
+    index = {key: rank for rank, key in enumerate(first_seen)}
+    if all(index[previous] < index[key] for key, earlier in predecessors.items() for previous in earlier):
+        return first_seen
+
+    sorter = TopologicalSorter(predecessors)
+    try:
+        sorter.prepare()
+    except CycleError:
+        # Contradictory source orders cannot both be represented. Preserve the
+        # original listing's order and append the additional rows as before.
+        return first_seen
+
+    ready: list[int] = []
+    ordered = []
+    while sorter.is_active():
+        for key in sorter.get_ready():
+            heapq.heappush(ready, index[key])
+
+        key = first_seen[heapq.heappop(ready)]
+        ordered.append(key)
+        sorter.done(key)
+
+    return tuple(ordered)
+
+
 def _release_medium(medium: _MergedMedium) -> ReleaseMedium:
     """Freeze accumulated language evidence without inferring track credits."""
     views = [
@@ -604,19 +634,27 @@ def _release_medium(medium: _MergedMedium) -> ReleaseMedium:
 
     merged_tracks: dict[_TrackKey, _MergedTrack] = {}
     if any(count > 1 for count in maximum_counts.values()):
-        # Start with a full listing so a sparse translation cannot move the
-        # repeated rows to the end of the disc or claim the wrong occurrence.
+        # Prefer the most extensive source for the initial track facts.
         views.sort(key=lambda entry: len(entry[0].tracks), reverse=True)
 
+    predecessors: dict[_TrackKey, set[_TrackKey]] = {}
     for view, language, script, counts in views:
         seen: Counter[_PositionKey] = Counter()
+        previous: _TrackKey | None = None
         for row, track in enumerate(view.tracks, 1):
             key = _position_key(track.number, row)
             if counts[key] != maximum_counts[key]:
                 continue
             seen[key] += 1
-            _merge_track_variant(merged_tracks, track, (key, seen[key]), language, script)
+            track_key = (key, seen[key])
+            _merge_track_variant(merged_tracks, track, track_key, language, script)
 
+            earlier = predecessors.setdefault(track_key, set())
+            if previous is not None:
+                earlier.add(previous)
+            previous = track_key
+
+    ordered_tracks = (merged_tracks[key] for key in _ordered_track_keys(predecessors))
     tracks = tuple(
         ProviderTrack(
             track_number=track.number,
@@ -627,7 +665,7 @@ def _release_medium(medium: _MergedMedium) -> ReleaseMedium:
             duration_seconds=track.duration_seconds,
             printed_number=track.printed_number,
         )
-        for track in merged_tracks.values()
+        for track in ordered_tracks
     )
 
     return ReleaseMedium(

@@ -7,6 +7,7 @@ from enum import StrEnum
 
 from metadata_polisher.application.changes import RenameDecision
 from metadata_polisher.application.review import (
+    require_new_candidate_decision,
     set_clear_decision,
     set_keep_existing_decision,
     set_manual_decision,
@@ -235,6 +236,11 @@ def retain_user_decision(
 ) -> FieldReviewState:
     """Retain independent human choices; a new association requires review again."""
     if old.decision_origin is not DecisionOrigin.USER:
+        # Undo snapshots and live reviews can already be waiting for a decision
+        # about a reassigned track. Refreshing the evidence cannot approve it.
+        if old.needs_new_candidate_decision:
+            return require_new_candidate_decision(fresh)
+
         return fresh
 
     # Keep, Clear and manual values express local intent independently of the
@@ -262,11 +268,7 @@ def retain_user_decision(
 
         # Even identical text can belong to a different track or release. Retain
         # the original local value until the newly associated candidate is reviewed.
-        return replace(
-            fresh, decision=FieldDecisionKind.UNRESOLVED, selected_proposal=None, manual_value=None,
-            decision_origin=DecisionOrigin.DEFAULT, requires_review=True,
-            reason_codes=tuple(dict.fromkeys((*fresh.reason_codes, ReviewReasonCode.CANDIDATE_DEPENDENCY_CHANGED))),
-        )
+        return require_new_candidate_decision(fresh)
 
     return fresh
 
@@ -599,6 +601,7 @@ def _is_safe_addition(review: FieldReviewState) -> bool:
         and len(review.proposals) == 1
         and review.proposals[0].confidence is FieldConfidence.HIGH
         and ReviewReasonCode.PROPOSAL_AMBIGUOUS not in review.reason_codes
+        and not review.needs_new_candidate_decision
     )
 
 

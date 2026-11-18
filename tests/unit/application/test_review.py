@@ -474,6 +474,29 @@ def test_release_script_cannot_resolve_a_contradictory_track_variant(
     assert state.proposals[0].members[0].script == "Jpan"
 
 
+@pytest.mark.parametrize("preferred_language", ["en", "auto"])
+@pytest.mark.parametrize("value", ["1979", "!!!", "19:79", "１９７９…"])
+def test_script_neutral_title_can_use_its_declared_script(preferred_language: str, value: str) -> None:
+    state = build_field_review_state(
+        field=MetadataField.TITLE, read_state=FieldReadState.MISSING, existing_value=None,
+        proposals=(proposal(value, language="eng", script="Latn"),),
+        preferred_language=preferred_language,
+    )
+
+    assert state.decision is FieldDecisionKind.USE_PROPOSAL
+    assert state.selected_proposal is not None and state.selected_proposal.value == value
+
+
+@pytest.mark.parametrize("value", ["Сон", "١٢", "௨௩", "༄༅"])
+def test_unrecognised_script_specific_characters_cannot_confirm_a_latin_label(value: str) -> None:
+    state = build_field_review_state(
+        field=MetadataField.TITLE, read_state=FieldReadState.MISSING, existing_value=None,
+        proposals=(proposal(value, language="eng", script="Latn"),), preferred_language="en",
+    )
+
+    assert state.decision is FieldDecisionKind.UNRESOLVED
+
+
 def test_reranking_rebuilds_default_proposal_order_without_mutating_old_state() -> None:
     japanese = proposal("星のカービィ", source_id="catalogue-a", language="jpn", script="Jpan")
     english = proposal("Kirby", source_id="catalogue-b", language="eng", script="Latn")

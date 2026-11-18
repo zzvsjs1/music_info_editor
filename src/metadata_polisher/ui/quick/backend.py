@@ -436,7 +436,6 @@ class QuickBackend(QObject):
         )
 
     def _filename_needs_attention(self) -> bool:
-        ids = self._scope_ids()
         filename_codes = {
             ChangeIssueCode.INVALID_RENAME_TEMPLATE, ChangeIssueCode.RENAME_RENDER_FAILED,
             ChangeIssueCode.INVALID_DESTINATION_FILENAME, ChangeIssueCode.FILENAME_REPAIRED,
@@ -445,12 +444,11 @@ class QuickBackend(QObject):
 
         # Failed rendering can remove the preview entirely. Keep its warning
         # discoverable rather than treating the absent preview as a clean file.
+        changes = scoped_change_sets(self.session_state, frozenset(self._scope_ids()), included_ids=self._included)
         return any(
             issue.code in filename_codes
-            for group in self.session_state.groups
-            for file in group.reviewed_files
-            if file.file_id in ids and file.change_set is not None
-            for issue in file.change_set.validation.issues
+            for change in changes
+            for issue in change.validation.issues
         )
 
     def _scan_warning_count(self) -> int:
@@ -602,12 +600,7 @@ class QuickBackend(QObject):
 
     def _rename_validation(self) -> str:
         ids = self._scope_ids()
-        changes = tuple(
-            file.change_set
-            for group in self.session_state.groups
-            for file in group.reviewed_files
-            if file.file_id in ids and file.change_set is not None
-        )
+        changes = scoped_change_sets(self.session_state, frozenset(ids), included_ids=self._included)
         if len(ids) > 1:
             # The denominator is the entire explicit scope, including files
             # which do not yet have a review or an included rename decision.

@@ -440,6 +440,17 @@ def test_invalid_template_is_a_structured_blocker_when_rename_is_requested() -> 
     assert issue_codes(change_set) == (ChangeIssueCode.INVALID_RENAME_TEMPLATE,)
 
 
+@pytest.mark.parametrize("title", (".metadata-polisher-staging-demo", ".METADATA-POLISHER-STAGING-Demo"))
+def test_rename_cannot_publish_a_filename_reserved_for_transaction_staging(title: str) -> None:
+    source = make_source(metadata=MetadataSnapshot(title=title))
+    change = build_change_set(source, base_reviews(source), RenameDecision.APPLY_RENAME, template="%title%")
+
+    assert change.status is ChangeSetStatus.BLOCKED
+    assert change.rename_change is None
+    assert issue_codes(change) == (ChangeIssueCode.INVALID_DESTINATION_FILENAME,)
+    assert "reserved" in change.validation.issues[0].message.lower()
+
+
 def test_template_with_no_usable_stem_is_an_invalid_destination() -> None:
     source = make_source()
 

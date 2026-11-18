@@ -501,8 +501,21 @@ class TransactionalFileWriter:
                 # access on Windows. After releasing the guard, reacquire deletion
                 # access and compare its version on the very handle used to remove.
                 cleanup_issues = self._remove_if_present(destination, expected_version=published)
+                final_path = source.path
+                if cleanup_issues:
+                    # A reader may have blocked deletion, or another file may now
+                    # occupy the published name. Only report a retained output if
+                    # the still-pinned transaction object is at that name.
+                    try:
+                        retained = handles.enter_context(self._filesystem.pin_file(destination))
+                    except OSError:
+                        pass  # The cleanup issue identifies the unconfirmed destination.
+                    else:
+                        if retained[:2] == identity[:2]:
+                            final_path = destination
+
                 return self._failed(
-                    events, operation_id, source, source.path, progress.stage,
+                    events, operation_id, source, final_path, progress.stage,
                     (*verification, *cleanup_issues), progress.completed_backup_path,
                 )
             except OSError as error:

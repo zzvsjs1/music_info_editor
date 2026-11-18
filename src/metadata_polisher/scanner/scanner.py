@@ -10,11 +10,8 @@ from metadata_polisher.domain.errors import Issue, MediaErrorCode
 from metadata_polisher.domain.media import LocalMediaFile, UnsupportedMediaFile
 from metadata_polisher.execution.cancellation import CancellationToken, NeverCancelledToken
 from metadata_polisher.formats.base import MediaFormatAdapter, MediaFormatError
-from metadata_polisher.infrastructure.filesystem import (
-    RECOVERY_DIRECTORY_PREFIX,
-    STAGING_FILE_PREFIX,
-    read_file_version,
-)
+from metadata_polisher.infrastructure.filesystem import RECOVERY_DIRECTORY_PREFIX, read_file_version
+from metadata_polisher.rename.windows import is_staging_filename
 from metadata_polisher.scanner.filename_hints import extract_filename_hints
 
 
@@ -134,7 +131,7 @@ def scan_media(
 
         for name in sorted(file_names, key=lambda name: (name.casefold(), name)):
             active_cancellation.raise_if_cancelled()
-            if name.casefold().startswith(STAGING_FILE_PREFIX):
+            if is_staging_filename(name):
                 continue
             path = directory / name
 

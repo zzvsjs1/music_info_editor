@@ -219,3 +219,22 @@ def test_partial_translation_cannot_identify_which_repeated_number_it_describes(
     """
     tracks = parse_album_detail(html, source_url="https://vgmdb.net/album/42").media[0].tracks
     assert [[title.value for title in track.titles] for track in tracks] == [["Intro"], ["Finale"]]
+
+
+@pytest.mark.parametrize("shorter_first", [True, False])
+def test_partial_language_views_preserve_relative_order_around_repeated_tracks(shorter_first: bool) -> None:
+    repeated = """<span lang="en"><table class="role">
+      <tr><td>1</td><td>Intro</td></tr><tr><td>1</td><td>Reprise</td></tr>
+      <tr><td>2</td><td>Theme</td></tr></table></span>"""
+    sparse = """<span lang="ja"><table class="role">
+      <tr><td>1</td><td>Ambiguous translation</td></tr><tr><td>2</td><td>主題</td></tr>
+      <tr><td>3</td><td>間奏</td></tr><tr><td>4</td><td>終曲</td></tr></table></span>"""
+    views = repeated + sparse if shorter_first else sparse + repeated
+    html = f'<h1><span class="albumtitle">Album</span></h1><div id="tracklist">{views}</div>'
+
+    tracks = parse_album_detail(html, source_url="https://vgmdb.net/album/42").media[0].tracks
+
+    assert [track.track_number for track in tracks] == [1, 1, 2, 3, 4]
+    assert [{title.value for title in track.titles} for track in tracks] == [
+        {"Intro"}, {"Reprise"}, {"Theme", "主題"}, {"間奏"}, {"終曲"},
+    ]

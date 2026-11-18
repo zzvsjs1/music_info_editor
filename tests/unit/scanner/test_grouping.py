@@ -201,6 +201,21 @@ def test_incomplete_disc_tags_warn_without_assigning_unknown_file_to_a_disc() ->
     assert result.warnings[0].affected_file_ids == tuple(file.file_id for file in files)
 
 
+def test_incomplete_later_disc_preserves_the_earlier_restart() -> None:
+    positions = [(3, 2), (2, 2), (1, 1), (2, 1), (1, 2)]
+    files = tuple(
+        make_media_file(f"library/Set/{name}.flac", album="Set", disc_number=disc, track_number=track)
+        for name, (disc, track) in zip("ABCDE", positions, strict=True)
+    )
+
+    result = group_scanned_files(files)
+
+    assert tuple(group.files for group in result.groups) == ((files[2], files[4]), (files[0], files[1], files[3]))
+    assert len(result.warnings) == 1
+    assert result.warnings[0].group_id == result.groups[1].group_id
+    assert result.warnings[0].reason is GroupingWarningReason.MIXED_DISC_TAGS
+
+
 # Even matching disc and track filename prefixes remain weak evidence;
 # auto-splitting requires the corresponding readable real tags.
 def test_filename_hint_restart_is_warning_only_and_never_strong_split_evidence() -> None:

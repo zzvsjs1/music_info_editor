@@ -105,11 +105,22 @@ def rename_intent(reviewed: ReviewedFileState) -> RenameDecision:
     return reviewed.change_set.rename_decision
 
 
-def scoped_change_sets(state: SessionState, file_ids: frozenset[str] | None = None) -> tuple[FileChangeSet, ...]:
-    """Reserve all known physical names and only the requested scope's queued destinations."""
-    changes = tuple(file.change_set for group in state.groups for file in group.reviewed_files
-                    if file.change_set is not None and (file_ids is None or file.file_id in file_ids))
-    return _checked_destinations(state, changes, changes)
+def scoped_change_sets(
+    state: SessionState, file_ids: frozenset[str] | None = None, *, included_ids: frozenset[str] = frozenset(),
+) -> tuple[FileChangeSet, ...]:
+    """Check the displayed files against physical names and renames queued in this batch."""
+    batch_ids = None if file_ids is None else file_ids | included_ids
+    batch = tuple(
+        file.change_set for group in state.groups for file in group.reviewed_files
+        if file.change_set is not None and (batch_ids is None or file.file_id in batch_ids)
+    )
+    # Files already included can reserve a name even when the dialogue displays
+    # a smaller selection. Only the displayed files need a projected result.
+    if file_ids is None or not included_ids:
+        return _checked_destinations(state, batch, batch)
+
+    displayed = tuple(change for change in batch if change.file_id in file_ids)
+    return _checked_destinations(state, displayed, batch)
 
 
 def _checked_destinations(

@@ -10,6 +10,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 _GENERIC_READ = 0x80000000
+_FILE_WRITE_DATA = 0x0002
 _DELETE = 0x00010000
 _SHARE_READ = 1
 _SHARE_WRITE = 2
@@ -78,6 +79,11 @@ def open_guard(path: Path, *, allow_rename: bool = False, for_deletion: bool = F
 def open_file_identity(path: Path) -> AbstractContextManager[int]:
     """Keep an ID alive across ReplaceFileW's exclusive open of the edited file."""
     return _open_file_handle(path, 0, _SHARE_READ | _SHARE_WRITE | _SHARE_DELETE)
+
+
+def open_write_probe(path: Path) -> AbstractContextManager[int]:
+    """Check the source DACL and sharing rules without truncating or writing the file."""
+    return _open_file_handle(path, _FILE_WRITE_DATA, _SHARE_READ | _SHARE_WRITE | _SHARE_DELETE)
 
 
 def delete_on_close(descriptor: int) -> None:

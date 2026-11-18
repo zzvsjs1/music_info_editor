@@ -1,7 +1,11 @@
 """The offline Apply preflight and direct writer preserve a read-only source."""
 
+import os
 import shutil
 import stat
+import subprocess
+
+import pytest
 
 from metadata_polisher.application.apply import LocalApplyPreflightInspector
 from metadata_polisher.application.changes import RenameDecision, build_change_set
@@ -17,6 +21,41 @@ from metadata_polisher.scanner.scanner import scan_media
 from metadata_polisher.session.review_previews import local_reviews
 from tests.integration.formats.test_format_contract import make_wave_fixture
 from tests.integration.formats.test_transaction_with_adapter import RecordingEventSink
+from tests.unit.infrastructure.test_transaction import make_rename_only_change_set
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires Windows file ACLs.")
+def test_rename_rejects_source_acl_denying_data_writes(tmp_path):
+    path = tmp_path / "restricted.wav"
+    destination = tmp_path / "renamed.wav"
+    make_wave_fixture(path)
+    original = path.read_bytes()
+    # Deny FILE_WRITE_DATA to Everyone on this disposable file only. The
+    # source still has delete access and its DOS read-only flag remains clear.
+    subprocess.run(["icacls", str(path), "/deny", "*S-1-1-0:(WD)"], check=True, capture_output=True)
+    try:
+        assert not path.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+        try:
+            with path.open("r+b"):
+                pytest.skip("The fixture filesystem did not enforce the Windows deny ACL.")
+        except PermissionError:
+            pass
+
+        (source,) = scan_media(tmp_path, FormatRegistry()).supported_files
+        changes = make_rename_only_change_set(source, destination)
+        backup = BackupPolicy(False, None, tmp_path, "acl")
+        preflight = LocalApplyPreflightInspector().inspect(source, changes, backup)
+        result = TransactionalFileWriter().apply_file(
+            source, changes, WaveAdapter(), backup, NeverCancelledToken(), RecordingEventSink(),
+        )
+        assert not preflight.validation.source_writable
+        assert result.status is FileApplyStatus.FAILED
+        assert result.issues[0].code is MediaErrorCode.PERMISSION_DENIED
+        assert path.read_bytes() == original
+        assert list(tmp_path.iterdir()) == [path]
+    finally:
+        if path.exists():
+            subprocess.run(["icacls", str(path), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
 
 
 def test_preflight_and_direct_writer_reject_read_only_source_without_leaving_a_copy(tmp_path):

@@ -248,16 +248,19 @@ def _split_at_strong_disc_boundaries(
             track_numbers[disc].add(track)
 
     discs = sorted(by_disc)
-    # A changed disc tag alone is weak evidence. Keep the restart requirement:
-    # a later numbered track on the preceding disc, then track 1 on the next.
-    # Test it on the tagged discs themselves, independently of filename order.
-    if len(discs) < 2 or any(
-        max(track_numbers[previous], default=0) <= 1 or 1 not in track_numbers[current]
-        for previous, current in zip(discs, discs[1:], strict=False)
-    ):
+    if len(discs) < 2:
         return (files,)
 
-    return tuple(tuple(by_disc[disc]) for disc in discs)
+    # Check each pair of tagged discs independently. A partial disc can lack
+    # a restart without invalidating a separate, well-supported boundary.
+    segments = [by_disc[discs[0]]]
+    for previous, current in zip(discs, discs[1:], strict=False):
+        if max(track_numbers[previous], default=0) > 1 and 1 in track_numbers[current]:
+            segments.append([])
+
+        segments[-1].extend(by_disc[current])
+
+    return tuple(tuple(sorted(segment, key=_file_sort_key)) for segment in segments)
 
 
 def _disc_group_warning(group: AlbumGroup) -> GroupingWarning | None:
@@ -268,7 +271,7 @@ def _disc_group_warning(group: AlbumGroup) -> GroupingWarning | None:
             reason=GroupingWarningReason.MIXED_DISC_TAGS,
             group_id=group.group_id,
             affected_file_ids=tuple(file.file_id for file in group.files),
-            message="The disc tags disagree and do not establish every file's disc. Review the grouping.",
+            message="Several disc numbers are present, but the track and disc tags leave the grouping uncertain.",
         )
 
     if len(discs) == 1 and None not in discs:

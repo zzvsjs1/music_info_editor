@@ -1,7 +1,9 @@
 """Pure proposal consolidation and default Hybrid review policy."""
 
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from string import digits, punctuation
 
 from rapidfuzz import fuzz
 
@@ -73,6 +75,7 @@ _SCRIPT_ALIASES = {
 }
 _ROMANISED_ALIASES = frozenset(("latin", "latn", "romanised", "romanized", "romaji"))
 _LANGUAGE_NEUTRAL_FIELDS = frozenset((MetadataField.TRACK, MetadataField.DISC, MetadataField.DATE))
+_SCRIPT_NEUTRAL_CHARACTERS = frozenset(digits + punctuation + " ")
 
 _CLASSIFICATION_CONFIDENCE = {
     MatchClassification.HIGH: FieldConfidence.HIGH,
@@ -139,6 +142,13 @@ def _effective_script(value: FieldValue, declared_script: str | None) -> str | N
         observed = "jpan" if canonical_script == "jpan" else "han"
     elif profile.reason is LanguageProfileReason.LATIN_ONLY:
         observed = "latn"
+    elif profile.reason is LanguageProfileReason.NO_SCRIPT_EVIDENCE and _SCRIPT_NEUTRAL_CHARACTERS.issuperset(
+        unicodedata.normalize("NFKC", value_text)
+    ):
+        # Common digits and punctuation can accompany any script. Their
+        # full-width forms are equivalent, but other scripts have their own
+        # numerals and marks, so Unicode character categories alone are insufficient.
+        return canonical_script
     else:
         return None
 
@@ -1387,6 +1397,15 @@ def _user_reasons(state: FieldReviewState, action: ReviewReasonCode) -> tuple[Re
     return _ordered_reason_union(retained, (action,))
 
 
+def require_new_candidate_decision(fresh: FieldReviewState) -> FieldReviewState:
+    """Show the new evidence while keeping an invalidated approval out of Apply."""
+    return replace(
+        fresh, decision=FieldDecisionKind.UNRESOLVED, selected_proposal=None, manual_value=None,
+        decision_origin=DecisionOrigin.DEFAULT, requires_review=True,
+        reason_codes=_ordered_reason_union(fresh.reason_codes, (ReviewReasonCode.CANDIDATE_DEPENDENCY_CHANGED,)),
+    )
+
+
 def set_keep_existing_decision(state: FieldReviewState) -> FieldReviewState:
     """Record an explicit choice to retain the local value or its missing state."""
     if not isinstance(state, FieldReviewState):
@@ -1511,7 +1530,7 @@ def rerank_field_review_state(
     # A language edit can recompute defaults, but an explicit human decision
     # survives. Reattach its selected value to the newly ranked proposal object.
     if state.decision_origin is DecisionOrigin.DEFAULT:
-        return _hybrid_state(
+        fresh = _hybrid_state(
             field=state.field,
             read_state=state.read_state,
             existing_value=state.existing_value,
@@ -1519,6 +1538,7 @@ def rerank_field_review_state(
             extra_reason_codes=ranking.reason_codes,
             proposal_choice_ambiguous=ranking.ambiguous,
         )
+        return require_new_candidate_decision(fresh) if state.needs_new_candidate_decision else fresh
 
     selected_proposal = None
 

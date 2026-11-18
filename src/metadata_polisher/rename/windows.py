@@ -4,6 +4,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
+STAGING_FILE_PREFIX = ".metadata-polisher-staging-"
+
+
+def is_staging_filename(name: str) -> bool:
+    """Identify the transaction namespace that library scans omit."""
+    return name.casefold().startswith(STAGING_FILE_PREFIX)
+
 
 class FilenameIssueSeverity(Enum):
     """Whether a filename issue was repaired or must block a rename."""
@@ -18,6 +25,7 @@ class FilenameIssueCode(Enum):
     INVALID_CHARACTERS_REPLACED = "invalid_characters_replaced"
     TRAILING_DOT_OR_SPACE_REPAIRED = "trailing_dot_or_space_repaired"
     RESERVED_DEVICE_NAME_REPAIRED = "reserved_device_name_repaired"
+    RESERVED_STAGING_NAME = "reserved_staging_name"
     CONTROL_CHARACTER = "control_character"
     INVALID_UNICODE = "invalid_unicode"
     EMPTY_COMPONENT = "empty_component"
@@ -178,6 +186,18 @@ def sanitise_windows_filename(name: str) -> FilenameValidationResult:
                 code=FilenameIssueCode.RESERVED_DEVICE_NAME_REPAIRED,
                 severity=FilenameIssueSeverity.REPAIR,
                 message="A reserved Windows device name was prefixed with an underscore.",
+            )
+        )
+
+    if is_staging_filename(candidate):
+        issues.append(
+            FilenameIssue(
+                code=FilenameIssueCode.RESERVED_STAGING_NAME,
+                severity=FilenameIssueSeverity.BLOCKING,
+                message=(
+                    f"Names starting with {STAGING_FILE_PREFIX} are reserved for temporary files. "
+                    "Choose a different filename."
+                ),
             )
         )
 

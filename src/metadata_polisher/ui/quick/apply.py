@@ -103,6 +103,7 @@ class QuickApply(QObject):
         self._preview_rows: list[dict[str, str]] = []
         self._preview_state: SessionState | None = None
         self._preview_file_ids: tuple[str, ...] = ()
+        self._preview_included: frozenset[str] = frozenset()
 
         host.changed.connect(self._host_changed)
         host.bridge.completed.connect(self._completed)
@@ -403,7 +404,10 @@ class QuickApply(QObject):
 
         self._rename_draft = draft
         sources = {source.file_id: source for group in original.groups for source in group.group.files}
-        changes = {item.file_id: item.change_set for group in draft.groups for item in group.reviewed_files}
+        # Unticked rows now keep their filenames. Previously included files
+        # outside this dialogue still reserve their queued names on acceptance.
+        scoped = scoped_change_sets(draft, frozenset(self._rename_ids), included_ids=self._rename_inclusion)
+        changes = {change.file_id: change for change in scoped}
         rows: list[dict[str, object]] = []
 
         for file_id in self._rename_ids:
@@ -501,19 +505,22 @@ class QuickApply(QObject):
         state = self._host.session_state
         file_ids = tuple(self._host._scope_ids())
 
-        # Progress, focus and window notifications often leave both inputs
-        # unchanged. Group objects contain the source snapshots and review
-        # decisions, so their immutable tuple also detects completed rescans.
+        # Focus and progress notifications often leave every filename input
+        # unchanged. Inclusion can change reservations without changing a group.
         if (
             self._preview_state is not None
             and self._preview_state.groups is state.groups
+            and self._preview_state.unsupported_files is state.unsupported_files
             and self._preview_state.root == state.root
             and self._preview_file_ids == file_ids
+            and self._preview_included == self._host._included
         ):
             return
 
-        selected = set(file_ids)
-        reviews = {item.file_id: item for group in state.groups for item in group.reviewed_files}
+        selected = frozenset(file_ids)
+        changes_by_id = {
+            change.file_id: change for change in scoped_change_sets(state, selected, included_ids=self._host._included)
+        }
         rows: list[dict[str, str]] = []
 
         for group in state.groups:
@@ -521,8 +528,7 @@ class QuickApply(QObject):
                 if source.file_id not in selected:
                     continue
 
-                reviewed = reviews.get(source.file_id)
-                changes = reviewed.change_set if reviewed is not None else None
+                changes = changes_by_id.get(source.file_id)
                 preview = changes.rename_preview if changes else None
                 rename = changes is not None and changes.rename_decision is RenameDecision.APPLY_RENAME
                 issues = "; ".join(issue.message for issue in changes.validation.issues) if changes else "No review yet"
@@ -539,6 +545,7 @@ class QuickApply(QObject):
         self._preview_rows = rows
         self._preview_state = state
         self._preview_file_ids = file_ids
+        self._preview_included = self._host._included
 
     @Slot()
     def closePreviews(self) -> None:
